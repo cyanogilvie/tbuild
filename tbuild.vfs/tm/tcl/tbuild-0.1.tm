@@ -1,4 +1,4 @@
-#!/usr/bin/env kbskit8.6
+#!/usr/bin/env cfkit8.6
 
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
@@ -198,7 +198,13 @@ oo::objdefine actions {
 				}
 
 				set main.tcl_data [string map $tokens {
-package require starkit
+if {[catch {
+	package require starkit
+}]} {
+	set have_starkit	0
+} else {
+	set have_starkit	1
+}
 package require platform
 
 apply {
@@ -217,7 +223,7 @@ apply {
 	}
 }
 
-if {[starkit::startup] eq "sourced"} return
+if {$have_starkit && [starkit::startup] eq "sourced"} return
 
 try {
 	package require app-[apply {{argv} %choose_package%} $argv]
@@ -337,11 +343,42 @@ try {
 				}
 				set app_name		[file join $out_app_base $name]
 				set app_name_static	[file join $out_app_base ${name}-static]
-				puts "Writing application \"$app_name\""
-				exec -- sdx wrap $app_name -vfs $name.vfs -interp $runtime
-				if {$platform ne "tcl"} {
-					puts "Writing application \"$app_name_static\""
-					exec -- sdx wrap $app_name_static -vfs $name.vfs -runtime $runtime_path
+				if {"starkit" in [dict get $runtime_info builtin_packages]} {
+					puts "Writing application \"$app_name\""
+					exec -- sdx wrap $app_name -vfs $name.vfs -interp [file tail $runtime_path]
+					if {$platform ne "tcl"} {
+						puts "Writing application \"$app_name_static\""
+						exec -- sdx wrap $app_name_static -vfs $name.vfs -runtime $runtime_path
+					}
+				} elseif {"trofs" in [dict get $runtime_info builtin_packages]} {
+					package require trofs
+
+					set header	""
+					append header	"#!/bin/sh\n"
+					append header	"# \\\n"
+					append header	[string map [list %r $runtime_name] {exec "%r" "$0" ${1+"$@"}}] "\n"
+					append header \
+{
+package require trofs
+set top		[trofs::mount [info script]]
+set main	[file join $top main.tcl]
+if {![file exists $main]} {
+	puts stderr "No main.tcl"
+	exit 1
+}
+source $main
+}
+					puts "Writing application \"$app_name\""
+					cflib::writefile $app_name $header
+					trofs::archive $name.vfs $app_name
+
+					if {$::tcl_platform(platform) eq "unix"} {
+						file attributes $app_name -permissions rwxr-xr-x
+					}
+
+					if {$platform ne "tcl"} {
+						# TODO: merge $name.vfs with boot trofs
+					}
 				}
 			}
 		}
@@ -393,6 +430,9 @@ try {
 
 			set available	[my _find_compatible $req $compatible_platforms]
 			try {
+				if {[llength $available] == 0} {
+					throw {not_found} ""
+				}
 				foreach candidate $available {
 					lassign $candidate ver type path
 
@@ -427,7 +467,11 @@ try {
 			} trap {found} {} {
 				continue
 			} trap {not_found} {} {
+				puts stderr "No suitable candidates found for requirement \"$req\""
 				error "No suitable candidates found for requirement \"$req\""
+			} on error {errmsg options} {
+				puts stderr "Unexpected error resolving dep ($req):\n[dict get $options -errorinfo]"
+				return -options $options $errmsg
 			}
 		}
 
@@ -439,8 +483,10 @@ try {
 		set fqfn_base	[fullynormalize $base]
 		set fqfn_path	[fullynormalize $path]
 		set baselen	[string length $fqfn_base]
-		set prefix	[string range $path 0 $baselen-1]
-		if {$prefix ne $base} {
+		set prefix	[string range $fqfn_path 0 $baselen-1]
+		if {$prefix ne $fqfn_base} {
+			puts "fqfn_base: ($fqfn_base)"
+			puts "fqfn_path: ($fqfn_path)"
 			error "\"$path\" isn't contained in \"$base\""
 		}
 		string range $fqfn_path $baselen+1 end
@@ -654,16 +700,112 @@ try {
 	}
 
 	#>>>
+	method rpm {args} { #<<<
+		package require rpm
+
+		global projinfo
+		my _load_projfile
+
+		if {![dict exists $projinfo rpms]} {
+			dict set projinfo rpms {}
+		}
+
+		if {[llength $args] == 0 || "all" in $args} {
+			set args	[dict keys [dict get $projinfo rpms]]
+		}
+
+		set built_apps	[dict create]
+		foreach name $args {
+			set rpminfo	[dict get $projinfo rpms $name]
+			dict set rpminfo name $name
+			set runtimes	{}
+
+			dict for {appname installpath} [dict get $rpminfo appfiles] {
+				if {![dict exists $built_apps $appname]} {
+					puts "----- building app ($appname) -----"
+					my _build_application $appname
+					dict set built_apps $appname 1
+				}
+				lappend runtimes	[dict get $projinfo applications $name runtime]
+			}
+			set runtimes	[lsort -unique $runtimes]
+
+			dict for {rpmtarget platform} [dict get $rpminfo target] {
+				puts "would build rpm \"$name\", rpmtarget: ($rpmtarget) platform: ($platform)"
+
+				if {![dict exists $rpminfo version]} {
+					error "Must define rpm version"
+				}
+				if {![dict exists $rpminfo summary]} {
+					error "Require summary to be defined to build an rpm"
+				}
+				if {![dict exists $rpminfo description]} {
+					error "Require description to be defined to build an rpm"
+				}
+				set reqs	[dict get $rpminfo requires]
+				foreach runtime $runtimes {
+					switch -glob -- $runtime {
+						"*cfkit*" {
+							lappend reqs	"cfkit"
+						}
+
+						"*kbskit*" {
+							lappend reqs	"kbskit"
+						}
+					}
+				}
+				dict set rpminfo requires [lsort -unique $reqs]
+
+				#if {[info exists rpm]} {unset rpm}
+				#array set rpm $rpminfo
+				#puts "rpm settings:"
+				#parray rpm
+				#unset rpm
+
+				set files	{}
+				set out_app_base	[file join [dict get $::tbuildconf repo_base] apps $platform]
+				dict for {appname installpath} [dict get $rpminfo appfiles] {
+					set app_src		[file join $out_app_base $appname]
+					lappend files	$app_src $installpath
+				}
+				if {[dict exists $rpminfo files]} {
+					lappend files {*}[dict get $rpminfo files]
+				}
+				puts "files:\n[join $files \n]"
+				try {
+					rpm::make_rpm $rpminfo $files $rpmtarget
+				} on error {errmsg options} {
+					puts stderr "Error building rpm: $errmsg"
+					cflib::writefile /tmp/failed.spec [rpm::build_spec $rpminfo $files]
+					return -options $options $errmsg
+				}
+			}
+		}
+	}
+
+	#>>>
 	method remove {} { #<<<
 	}
 
 	#>>>
 	method path {args} { #<<<
 		set paths		{}
+
+		# Apps
 		set basepath	[file join [dict get $::tbuildconf repo_base] apps]
 		foreach platform [platform::patterns [platform::identify]] {
 			# TODO: figure out how to quote spaces and other nasties
 			set path		[file join $basepath $platform]
+			if {"-all" in $args || [file isdirectory $path]} {
+				lappend paths	[file nativename $path]
+			}
+		}
+
+		# Runtimes
+		set basepath	[file join [dict get $::tbuildconf repo_base] runtimes]
+		foreach platform [platform::patterns [platform::identify]] {
+			# TODO: figure out how to quote spaces and other nasties
+			set path		[file join $basepath $platform bin]
 			if {"-all" in $args || [file isdirectory $path]} {
 				lappend paths	[file nativename $path]
 			}
@@ -798,7 +940,11 @@ try {
 
 					#>>>
 					description {cx desc} { #<<<
-						dict set ::projinfo {*}$cx description $desc
+						set trimmed	{}
+						foreach line [string trim [split $desc \n]] {
+							lappend trimmed	[string trim $line]
+						}
+						dict set ::projinfo {*}$cx description [join $trimmed \n]
 					}
 
 					#>>>
@@ -917,6 +1063,125 @@ try {
 			}
 
 			#>>>
+			rpm {name settings} { #<<<
+				dict set ::projinfo rpms $name {
+					target			{}
+					release			1
+					license			"commercial"
+					vendor			"Codeforge"
+					group			"Applications/System"
+					sourcetar		"tbuild_tmp_source.tar.gz"
+					requires		{}
+					post_scriptlet	""
+					preun_scriptlet	""
+				}
+				dsl_eval proj {
+					version {cx version} { #<<<
+						dict set ::projinfo {*}$cx version $version
+					}
+
+					#>>>
+					summary {cx summary} { #<<<
+						dict set ::projinfo {*}$cx summary $summary
+					}
+
+					#>>>
+					description {cx desc} { #<<<
+						set trimmed	{}
+						foreach line [split [string trim $desc] \n] {
+							lappend trimmed	[string trim $line]
+						}
+						dict set ::projinfo {*}$cx description [join $trimmed \n]
+					}
+
+					#>>>
+					target {cx target platform} { #<<<
+						dict set ::projinfo {*}$cx target $target $platform
+					}
+
+					#>>>
+					release {cx rel} { #<<<
+						dict set ::projinfo {*}$cx release $rel
+					}
+
+					#>>>
+					license {cx lic} { #<<<
+						dict set ::projinfo {*}$cx license $lic
+					}
+
+					#>>>
+					vendor {cx vendor} { #<<<
+						dict set ::projinfo {*}$cx vendor $vendor
+					}
+
+					#>>>
+					group {cx group} { #<<<
+						dict set ::projinfo {*}$cx group $group
+					}
+
+					#>>>
+					rpmrequires {cx req} { #<<<
+						dict set ::projinfo {*}$cx requires $req
+					}
+
+					#>>>
+					applications {cx applist} { #<<<
+						package require sugar
+						set appfiles	{}
+						foreach cmdraw [sugar::scriptToList $applist] {
+							set cmd	{}
+							foreach token $cmdraw {
+								lassign $token type val
+
+								if {$type eq "TOK"} {
+									lappend cmd $val
+								}
+							}
+
+							switch -- [llength $cmd] {
+								0 {continue}
+
+								1 {
+									lappend cmd	[file join / usr bin [lindex $cmd 0]]
+								}
+
+								2 {}
+
+								default {
+									error "Invalid syntax for rpm application list: ($cmd)"
+								}
+							}
+
+							lappend appfiles	{*}$cmd
+						}
+						dict set ::projinfo {*}$cx appfiles $appfiles
+					}
+
+					#>>>
+					post_scriptlet {cx scr} { #<<<
+						dict set ::projinfo {*}$cx post_scriptlet $scr
+					}
+
+					#>>>
+					preun_scriptlet {cx scr} { #<<<
+						dict set ::projinfo {*}$cx preun_scriptlet $scr
+					}
+
+					#>>>
+					files {cx files} { #<<<
+						dict set ::projinfo {*}$cx files $files
+					}
+
+					#>>>
+					include {cx fn} { #<<<
+						return [cflib::readfile $fn]
+					}
+
+					#>>>
+				} $settings [list rpms $name]
+			}
+
+			#>>>
 		} [readfile $conffile]
 
 		interp delete proj
@@ -958,6 +1223,8 @@ try {
 			exit 1
 		}
 
+		# Special case: win32 runtime on a linux host that can run it with
+		# wine (works - how to accomodate it?)
 		if {$platform ni [platform::patterns [platform::identify]]} {
 			puts stderr "Runtime is incompatible with this platform, please import it on a compatible platform and copy the imported version here"
 			exit 1
