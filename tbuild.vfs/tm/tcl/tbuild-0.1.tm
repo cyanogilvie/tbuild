@@ -69,7 +69,7 @@ set tbuildconf [dict create \
 	projfile			tbuild.proj \
 	tm_build			tm \
 	repo_base			[file join $::env(HOME) .tbuild repo] \
-	default_runtime		kbskit* \
+	default_runtime		cfkit* \
 	default_platform	linux-glibc2.3-ix86 \
 ]
 
@@ -116,7 +116,12 @@ oo::objdefine actions {
 		}
 
 		if {$isapp} {
-			my _build_application $name {*}$args
+			try {
+				my _build_application $name {*}$args
+			} on error {errmsg options} {
+				puts stderr "Uncaught error building application \"$name\": [dict get $errorinfo]"
+				exit 3
+			}
 		}
 	}
 
@@ -183,21 +188,23 @@ oo::objdefine actions {
 
 		set appsettings	[dict get $projinfo applications $name]
 
+		puts stderr "building for \"$name\" platforms [dict keys [dict get $appsettings platforms]]"
 		dict for {platform platformsettings} [dict get $appsettings platforms] {
 			set before	[pwd]
 			my _in_tmp_dir {
-				file mkdir $name.vfs
+				try {
+					file mkdir $name.vfs
 
-				# main.tcl <<<
-				set tokens	[dict create]
-				if {[dict exists $appsettings choose_package]} {
-					dict set tokens %choose_package% \
-							[list [dict get $appsettings choose_package]]
-				} else {
-					dict set tokens %choose_package% [list [list return $name]]
-				}
+					# main.tcl <<<
+					set tokens	[dict create]
+					if {[dict exists $appsettings choose_package]} {
+						dict set tokens %choose_package% \
+								[list [dict get $appsettings choose_package]]
+					} else {
+						dict set tokens %choose_package% [list [list return $name]]
+					}
 
-				set main.tcl_data [string map $tokens {
+					set main.tcl_data [string map $tokens {
 if {[catch {
 	package require starkit
 }]} {
@@ -232,132 +239,131 @@ try {
 }
 }]
 
-				writefile [file join $name.vfs main.tcl] [set main.tcl_data]
-				# main.tcl >>>
+					writefile [file join $name.vfs main.tcl] [set main.tcl_data]
+					# main.tcl >>>
 
-				set app_base	[file join $name.vfs pkg tcl app-$name]
-				file mkdir $app_base
+					set app_base	[file join $name.vfs pkg tcl app-$name]
+					file mkdir $app_base
 
-				# _init.tcl <<<
-				if {[dict exists $appsettings entrypoint]} {
-					set entrypoint	[dict get $appsettings entrypoint]
-				} else {
-					set entrypoint	[lindex [dict get $appsettings files] 0]
-				}
-				if {$entrypoint ni [dict get $appsettings files]} {
-					error "Invalid file specified as entrypoint: \"$entrypoint\""
-				}
+					# _init.tcl <<<
+					if {[dict exists $appsettings entrypoint]} {
+						set entrypoint	[dict get $appsettings entrypoint]
+					} else {
+						set entrypoint	[lindex [dict get $appsettings files] 0]
+					}
+					if {$entrypoint ni [dict get $appsettings files]} {
+						error "Invalid file specified as entrypoint: \"$entrypoint\""
+					}
 
-				set _init.tcl_data		{}
-				set include_packages	{}
-				foreach req [dict get $appsettings requires] {
-					lappend _init.tcl_data	[list package require {*}$req]
-					lappend include_packages $req
-				}
-				if {[dict exists $platformsettings requires]} {
-					foreach req [dict get $platformsettings requires] {
-						puts stderr "Adding specific platform require: ($req) for $platform"
+					set _init.tcl_data		{}
+					set include_packages	{}
+					foreach req [dict get $appsettings requires] {
 						lappend _init.tcl_data	[list package require {*}$req]
 						lappend include_packages $req
 					}
-				}
-				lappend _init.tcl_data [list package provide app-$name [dict get $appsettings version]]
-				lappend _init.tcl_data "source \[file join \[file dirname \[info script\]\] [list $entrypoint]]"
-
-				writefile [file join $app_base _init.tcl] \
-						[join [set _init.tcl_data] "\n"]
-				# _init.tcl >>>
-
-				# app pkgIndex.tcl <<<
-				set pkgIndex.tcl_data	[string map [dict create \
-						%name%		[list app-$name] \
-						%version%	[list [dict get $appsettings version]] \
-				] {package ifneeded %name% %version% [list source [file join $dir _init.tcl]]
-				}]
-
-				writefile [file join $app_base pkgIndex.tcl] [set pkgIndex.tcl_data]
-				# app pkgIndex.tcl >>>
-
-				# Copy specified application files <<<
-				foreach file [dict get $appsettings files] {
-					set src_fn	[file join $before $file]
-					if {![file exists $src_fn]} {
-						error "Specified file doesn't exist: \"$file\""
+					if {[dict exists $platformsettings requires]} {
+						foreach req [dict get $platformsettings requires] {
+							puts stderr "Adding specific platform require: ($req) for $platform"
+							lappend _init.tcl_data	[list package require {*}$req]
+							lappend include_packages $req
+						}
 					}
-					if {![file readable $src_fn]} {
-						error "Specified file isn't readable: \"$file\""
+					lappend _init.tcl_data [list package provide app-$name [dict get $appsettings version]]
+					lappend _init.tcl_data "source \[file join \[file dirname \[info script\]\] [list $entrypoint]]"
+
+					writefile [file join $app_base _init.tcl] \
+							[join [set _init.tcl_data] "\n"]
+					# _init.tcl >>>
+
+					# app pkgIndex.tcl <<<
+					set pkgIndex.tcl_data	[string map [dict create \
+							%name%		[list app-$name] \
+							%version%	[list [dict get $appsettings version]] \
+					] {package ifneeded %name% %version% [list source [file join $dir _init.tcl]]
+					}]
+
+					writefile [file join $app_base pkgIndex.tcl] [set pkgIndex.tcl_data]
+					# app pkgIndex.tcl >>>
+
+					# Copy specified application files <<<
+					foreach file [dict get $appsettings files] {
+						set src_fn	[file join $before $file]
+						if {![file exists $src_fn]} {
+							error "Specified file doesn't exist: \"$file\""
+						}
+						if {![file readable $src_fn]} {
+							error "Specified file isn't readable: \"$file\""
+						}
+						set parts	[file split $file]
+						if {[lindex $parts 0] eq "/"} {
+							error "Absolute paths not allowed for files: \"$file\""
+						}
+						if {".." in $parts} {
+							error "Cannot have \"..\" in file specification: \"$file\""
+						}
+						set file_dest	[file join $app_base $file]
+						set file_dir	[file dirname $file_dest]
+						if {![file exists $file_dir]} {
+							file mkdir $file_dir
+						}
+						set file_contents	[readfile $src_fn binary]
+						writefile $file_dest $file_contents binary
 					}
-					set parts	[file split $file]
-					if {[lindex $parts 0] eq "/"} {
-						error "Absolute paths not allowed for files: \"$file\""
+					# Copy specified application files >>>
+
+					if {[dict exists $appsettings runtime]} {
+						set runtime		[dict get $appsettings runtime]
+					} else {
+						set runtime		[dict get $::tbuildconf default_runtime]
 					}
-					if {".." in $parts} {
-						error "Cannot have \"..\" in file specification: \"$file\""
+
+					if {$platform eq "tcl"} {
+						set runtime_platform	[dict get $::tbuildconf default_platform]
+					} else {
+						set runtime_platform	$platform
 					}
-					set file_dest	[file join $app_base $file]
-					set file_dir	[file dirname $file_dest]
-					if {![file exists $file_dir]} {
-						file mkdir $file_dir
+
+					lassign [my _select_runtime $runtime $runtime_platform] \
+							runtime_name \
+							runtime_version \
+							runtime_path \
+							runtime_info
+					set ::package_manifest [dict get $runtime_info builtin_packages]
+
+					set compatible_platforms	[platform::patterns $platform]
+					dict for {fn data} [my _resolve_packages $include_packages $compatible_platforms] {
+						puts stderr "transcribing file ($fn)"
+						set fqfn	[file join $name.vfs $fn]
+						set dir		[file dirname $fqfn]
+						if {![file exists $dir]} {
+							file mkdir $dir
+						}
+						writefile $fqfn $data binary
 					}
-					set file_contents	[readfile $src_fn binary]
-					writefile $file_dest $file_contents binary
-				}
-				# Copy specified application files >>>
 
-				if {[dict exists $appsettings runtime]} {
-					set runtime		[dict get $appsettings runtime]
-				} else {
-					set runtime		[dict get $::tbuildconf default_runtime]
-				}
+					unset ::package_manifest
 
-				if {$platform eq "tcl"} {
-					set runtime_platform	[dict get $::tbuildconf default_platform]
-				} else {
-					set runtime_platform	$platform
-				}
-
-				lassign [my _select_runtime $runtime $runtime_platform] \
-						runtime_name \
-						runtime_version \
-						runtime_path \
-						runtime_info
-
-				set ::package_manifest [dict get $runtime_info builtin_packages]
-
-				set compatible_platforms	[platform::patterns $platform]
-				dict for {fn data} [my _resolve_packages $include_packages $compatible_platforms] {
-					puts stderr "transcribing file ($fn)"
-					set fqfn	[file join $name.vfs $fn]
-					set dir		[file dirname $fqfn]
-					if {![file exists $dir]} {
-						file mkdir $dir
+					set out_app_base	[file join [dict get $::tbuildconf repo_base] apps $platform]
+					if {![file exists $out_app_base]} {
+						file mkdir $out_app_base
 					}
-					writefile $fqfn $data binary
-				}
+					set app_name		[file join $out_app_base $name]
+					set app_name_static	[file join $out_app_base ${name}-static]
+					if {"starkit" in [dict get $runtime_info builtin_packages]} {
+						puts "Writing application \"$app_name\""
+						exec -- sdx wrap $app_name -vfs $name.vfs -interp [file tail $runtime_path]
+						if {$platform ne "tcl"} {
+							puts "Writing application \"$app_name_static\""
+							exec -- sdx wrap $app_name_static -vfs $name.vfs -runtime $runtime_path
+						}
+					} elseif {"trofs" in [dict get $runtime_info builtin_packages]} {
+						package require trofs
 
-				unset ::package_manifest
-
-				set out_app_base	[file join [dict get $::tbuildconf repo_base] apps $platform]
-				if {![file exists $out_app_base]} {
-					file mkdir $out_app_base
-				}
-				set app_name		[file join $out_app_base $name]
-				set app_name_static	[file join $out_app_base ${name}-static]
-				if {"starkit" in [dict get $runtime_info builtin_packages]} {
-					puts "Writing application \"$app_name\""
-					exec -- sdx wrap $app_name -vfs $name.vfs -interp [file tail $runtime_path]
-					if {$platform ne "tcl"} {
-						puts "Writing application \"$app_name_static\""
-						exec -- sdx wrap $app_name_static -vfs $name.vfs -runtime $runtime_path
-					}
-				} elseif {"trofs" in [dict get $runtime_info builtin_packages]} {
-					package require trofs
-
-					set header	""
-					append header	"#!/bin/sh\n"
-					append header	"# \\\n"
-					append header	[string map [list %r $runtime_name] {exec "%r" "$0" ${1+"$@"}}] "\n"
-					append header \
+						set header	""
+						append header	"#!/bin/sh\n"
+						append header	"# \\\n"
+						append header	[string map [list %r $runtime_name] {exec "%r" "$0" ${1+"$@"}}] "\n"
+						append header \
 {
 package require trofs
 set top		[trofs::mount [info script]]
@@ -368,17 +374,20 @@ if {![file exists $main]} {
 }
 source $main
 }
-					puts "Writing application \"$app_name\""
-					cflib::writefile $app_name $header
-					trofs::archive $name.vfs $app_name
+						puts "Writing application \"$app_name\""
+						cflib::writefile $app_name $header
+						trofs::archive $name.vfs $app_name
 
-					if {$::tcl_platform(platform) eq "unix"} {
-						file attributes $app_name -permissions rwxr-xr-x
-					}
+						if {$::tcl_platform(platform) eq "unix"} {
+							file attributes $app_name -permissions rwxr-xr-x
+						}
 
-					if {$platform ne "tcl"} {
-						# TODO: merge $name.vfs with boot trofs
+						if {$platform ne "tcl"} {
+							# TODO: merge $name.vfs with boot trofs
+						}
 					}
+				} on error {errmsg options} {
+					puts stderr "Uncaught error building \"$name\" for platform \"$platform\":\n[dict get $options -errorinfo]"
 				}
 			}
 		}
@@ -391,12 +400,17 @@ source $main
 			set runtime_base	[file join [dict get $::tbuildconf repo_base] runtimes $compatplat]
 			foreach candidate [glob -nocomplain -type f [file join $runtime_base info *]] {
 				set info	[readfile $candidate]
+				set ext		[file extension $candidate]
+				switch -- $ext {
+					".exe"	{set candidate [file rootname $candidate]}
+					default	{set ext	""}
+				}
 				set simplename	[file tail $candidate]
 				if {[string match $runtime $simplename]} {
 					lappend candidates [list \
 							[file tail $candidate] \
 							[dict get $info builtin_packages Tcl] \
-							[file join $runtime_base bin $simplename] \
+							[file join $runtime_base bin $simplename]$ext \
 							$info \
 					]
 				}
@@ -726,12 +740,16 @@ source $main
 					my _build_application $appname
 					dict set built_apps $appname 1
 				}
-				lappend runtimes	[dict get $projinfo applications $name runtime]
+				lappend runtimes	[dict get $projinfo applications $appname runtime]
 			}
 			set runtimes	[lsort -unique $runtimes]
 
+			if {![dict exists $rpminfo target] || [dict size [dict get $rpminfo target]] == 0} {
+				puts stderr "No targets defined for rpm \"$name\""
+				exit 1
+			}
 			dict for {rpmtarget platform} [dict get $rpminfo target] {
-				puts "would build rpm \"$name\", rpmtarget: ($rpmtarget) platform: ($platform)"
+				puts "building rpm \"$name\", rpmtarget: ($rpmtarget) platform: ($platform)"
 
 				if {![dict exists $rpminfo version]} {
 					error "Must define rpm version"
@@ -769,7 +787,16 @@ source $main
 					lappend files	$app_src $installpath
 				}
 				if {[dict exists $rpminfo files]} {
-					lappend files {*}[dict get $rpminfo files]
+					foreach {pattern dst} [dict get $rpminfo files] {
+						foreach match [glob -nocomplain $pattern] {
+							if {[string index $dst end] eq "/"} {
+								lappend files	$match [file join $dst [file tail $match]]
+							} else {
+								lappend files	$match $dst
+							}
+						}
+					}
+					#lappend files {*}[dict get $rpminfo files]
 				}
 				puts "files:\n[join $files \n]"
 				try {
@@ -1074,6 +1101,7 @@ source $main
 					requires		{}
 					post_scriptlet	""
 					preun_scriptlet	""
+					appfiles		{}
 				}
 				dsl_eval proj {
 					version {cx version} { #<<<
@@ -1324,6 +1352,55 @@ source $main
 				file delete -force -- $tmpdir
 			}
 		}
+	}
+
+	#>>>
+	method run {args} { #<<<
+		package require platform
+		set cfg	[cflib::config new $args [subst {
+			variable platform	[list [dict get $::tbuildconf default_platform]]
+			variable runtime	[list [dict get $::tbuildconf default_runtime]]
+		}]]
+		set args	[$cfg rest]
+		set platform	[$cfg get platform]
+		lassign [my _select_runtime [$cfg get runtime] $platform] \
+				runtime_name \
+				runtime_version \
+				runtime_path \
+				runtime_info
+		set fp	[file tempfile launcherfn]
+		chan puts $fp [string map [list %p% [list $platform] %b% [file normalize ~]] {
+package require platform
+
+foreach pattern [platform::patterns %p%] {
+	set tmpath	[file normalize [file join %b% .tbuild repo tm $pattern]]
+	if {[file isdirectory $tmpath]} {
+		::tcl::tm::path add $tmpath
+	}
+	set pkgpath	[file normalize [file join %b% .tbuild repo pkg $pattern]]
+	if {[file isdirectory $pkgpath]} {
+		lappend ::auto_path	$pkgpath
+	}
+}
+
+set argv	[lassign $argv app]
+set argv0	$app
+source $app
+		}]
+		chan close $fp
+		set exitstatus	0
+		try {
+			exec $runtime_path $launcherfn {*}$args >@ stdout 2>@ stderr <@ stdin
+		} trap {CHILDSTATUS} {errmsg options} {
+			lassign [dict get $options -errorcode] code pid status
+			set exitstatus	$status
+		} finally {
+			if {[file exists $launcherfn]} {
+				file delete $launcherfn
+			}
+		}
+
+		exit $exitstatus
 	}
 
 	#>>>

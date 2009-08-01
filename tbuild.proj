@@ -1,0 +1,22 @@
+application "tbuild" {
+	version 0.2
+
+	runtime cfkit8.6
+
+	requires {
+		cflib
+		dsl
+		trofs
+		sugar
+		platform
+		rpm
+	}
+
+	files {
+		tbuild.tcl
+	}
+
+	platform tcl
+}
+
+# vim: ft=tcl
