@@ -1326,9 +1326,15 @@ source $main
 
 		set attribs	[file attributes $path]
 		writefile $runtime_outfn $runtime_data binary
+		if {[dict exists $attribs -longname]} {
+			dict unset attribs -longname
+		}
+		if {[dict exists $attribs -shortname]} {
+			dict unset attribs -shortname
+		}
 		file attributes $runtime_outfn {*}$attribs
 		writefile $info_outfn $output binary
-		puts "Imported runtime \"$path\""
+		puts "Imported runtime \"$path\": \"[file normalize $info_outfn]\""
 		exit 0
 	}
 
@@ -1385,7 +1391,28 @@ foreach pattern [platform::patterns %p%] {
 
 set argv	[lassign $argv app]
 set argv0	$app
-source $app
+if {$app ne ""} {
+	source $app
+} else {
+	set ::tcl_interactive	1
+	while {1} {
+		apply {
+			{} {
+				puts -nonewline "> "; flush stdout
+				set cmd	[chan gets stdin]
+				try {
+					uplevel #0 $cmd
+				} on error {errmsg options} {
+					puts stderr $errmsg
+				} on ok {res} {
+					if {$res ne ""} {
+						puts $res
+					}
+				}
+			}
+		}
+	}
+}
 		}]
 		chan close $fp
 		set exitstatus	0
