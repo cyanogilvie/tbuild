@@ -1431,6 +1431,120 @@ if {$app ne ""} {
 	}
 
 	#>>>
+	method _os {} { #<<<
+		set build	[string tolower $::tcl_platform(os)]
+		switch -- $::tcl_platform(platform) {
+			unix {
+				try {
+					exec lsb_release --id
+				} on ok {output} {
+					set idx	[string first ":" $output]
+					if {$idx != -1} {
+						set distribution	[string range $output $idx+1 end]
+						set distribution	[string tolower [string trim $distribution]]
+					}
+				} trap {POSIX ENOENT} {} {}
+				if {![info exists distribution]} {
+					if {[file exists /etc/SuSE-release]} {
+						set distribution	"suse"
+					} elseif {[file exists /etc/redhat-release]} {
+						set distribution	"redhat"
+					} elseif {[file exists /etc/fedora-release]} {
+						set distribution	"fedora"
+					} elseif {[file exists /etc/debian-release]} {
+						set distribution	"debian"
+					} elseif {[file exists /etc/gentoo-release]} {
+						set distribution	"gentoo"
+					} elseif {[file exists /etc/slackware-release]} {
+						set distribution	"slackware"
+					} else {
+						set distribution	"unknown"
+					}
+				}
+
+				append build "_" $distribution
+				return $build
+			}
+
+			windows {
+				return $build
+			}
+		}
+	}
+
+	#>>>
+	method os {} { #<<<
+		puts [my _os]
+	}
+
+	#>>>
+	method setup_rpm_build_environment {} { #<<<
+		package require rpm
+
+		try {
+			exec rpm --version
+		} trap {POSIX ENOENT} {errmsg options} {
+			puts "RPM isn't installed, installing"
+			switch -- [my _os] {
+				linux_ubuntu - linux_debian {
+					try {
+						exec -ignorestderr sudo apt-get install rpm >@ stdout
+					} on error {errmsg options} {
+						puts stderr "Couldn't install RPM: $errmsg"
+						return
+					}
+				}
+
+				windows {
+					puts stderr "Cannot build RPMS on windows"
+					return
+				}
+
+				linux_suse - linux_redhat {
+					puts stderr "RPM not installed on an RPM based distro?  Weird man"
+					return
+				}
+
+				default {
+					puts stderr "Don't know how to install RPM for platform \"[my _os]\""
+					return
+				}
+			}
+		}
+
+		set dirs		{}
+		foreach dir [list \
+				[rpm::rpm --eval %_sourcedir] \
+				[rpm::rpm --eval %_specdir] \
+				[rpm::rpm --eval %_srcrpmdir] \
+				[rpm::rpm --eval %_rpmdir] \
+				[rpm::rpm --eval %_builddir] \
+		] {
+			if {![file writable $dir]} {
+				lappend dirs $dir
+			}
+		}
+
+		if {[llength $dirs] == 0} {
+			puts "Permissions look ok already"
+			return
+		}
+
+		puts "We need to change the ownership of the following system directories"
+		puts "and their contents so that they are writable by the current"
+		puts "user ($::env(USER)):"
+		puts "\t[join $dirs \n\t]"
+		try {
+			exec sudo chown -R $::env(USER) {*}$dirs 2>@1
+		} trap {CHILDSTATUS} {errmsg options} {
+			lassign [dict get $options -errorcode] ecode pid code
+			puts stderr "Could not set permissions: $errmsg"
+		} on ok {output} {
+			puts "Ownership set"
+		}
+	}
+
+	#>>>
 }
 
 if {[llength $argv] == 0} {
