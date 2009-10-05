@@ -1,5 +1,5 @@
 application "tbuild" {
-	version 0.2
+	version 0.3
 
 	runtime cfkit8.6
 
@@ -10,6 +10,7 @@ application "tbuild" {
 		sugar
 		platform
 		rpm
+		rozfsutils
 	}
 
 	files {

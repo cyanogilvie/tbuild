@@ -68,9 +68,10 @@ proc dsl_eval {interp dsl_commands dsl_script args} { #<<<
 set tbuildconf [dict create \
 	projfile			tbuild.proj \
 	tm_build			tm \
+	app_build			app \
 	repo_base			[file join $::env(HOME) .tbuild repo] \
 	default_runtime		cfkit* \
-	default_platform	linux-glibc2.3-ix86 \
+	default_platform	linux-glibc2.9-x86_64 \
 ]
 
 foreach file [list \
@@ -86,7 +87,7 @@ foreach file [list \
 
 oo::object create actions
 oo::objdefine actions {
-	method build {name args} { #<<<
+	method build {{name "all"} args} { #<<<
 		global projinfo
 		my _load_projfile
 
@@ -236,6 +237,8 @@ try {
 	package require app-[apply {{argv} %choose_package%} $argv]
 } on error {errmsg options} {
 	puts stderr "$errmsg\n[dict get $options -errorinfo]"
+	#puts stderr "auto_path:\n\t[join $::auto_path \n\t]"
+	#puts stderr "tm path:\n\t[join [tcl::tm::path list] \n\t]"
 }
 }]
 
@@ -331,8 +334,8 @@ try {
 					set ::package_manifest [dict get $runtime_info builtin_packages]
 
 					set compatible_platforms	[platform::patterns $platform]
-					dict for {fn data} [my _resolve_packages $include_packages $compatible_platforms] {
-						puts stderr "transcribing file ($fn)"
+					dict for {fn data} [my _resolve_packages $include_packages $compatible_platforms $name] {
+						puts stderr "transcribing file ($fn) [string length $data] bytes"
 						set fqfn	[file join $name.vfs $fn]
 						set dir		[file dirname $fqfn]
 						if {![file exists $dir]} {
@@ -343,7 +346,7 @@ try {
 
 					unset ::package_manifest
 
-					set out_app_base	[file join [dict get $::tbuildconf repo_base] apps $platform]
+					set out_app_base	[file join $before [dict get $::tbuildconf app_build] $platform]
 					if {![file exists $out_app_base]} {
 						file mkdir $out_app_base
 					}
@@ -355,6 +358,44 @@ try {
 						if {$platform ne "tcl"} {
 							puts "Writing application \"$app_name_static\""
 							exec -- sdx wrap $app_name_static -vfs $name.vfs -runtime $runtime_path
+						}
+					} elseif {"rozfs" in [dict get $runtime_info builtin_packages]} {
+						package require rozfsutils
+
+						set header	""
+						append header	"#!/bin/sh\n"
+						append header	"# \\\n"
+						append header	[string map [list %r $runtime_name] {exec "%r" "$0" ${1+"$@"}}] "\n"
+						append header \
+{
+package require rozfs
+set top		[rozfs::mount [info script]]
+set main	[file join $top main.tcl]
+if {![file exists $main]} {
+	puts stderr "No main.tcl"
+	exit 1
+}
+source $main
+}
+						append header "\u001a"	;# ^Z
+
+						puts "Writing application \"$app_name\""
+						cflib::writefile $app_name $header
+						set h	[open $app_name a]
+						try {
+							chan configure $h -translation binary -encoding binary
+							chan seek $h 0 end
+							chan puts -nonewline $h [rozfsutils::serialize $name.vfs]
+						} finally {
+							chan close $h
+						}
+
+						if {$::tcl_platform(platform) eq "unix"} {
+							file attributes $app_name -permissions rwxr-xr-x
+						}
+
+						if {$platform ne "tcl"} {
+							# TODO: merge $name.vfs with boot trofs
 						}
 					} elseif {"trofs" in [dict get $runtime_info builtin_packages]} {
 						package require trofs
@@ -431,11 +472,26 @@ source $main
 	}
 
 	#>>>
-	method _resolve_packages {required compatible_platforms} { #<<<
+	method _resolve_packages {required compatible_platforms name} { #<<<
 		set file_list	[dict create]
 		foreach req $required {
 			puts stderr "Resolving requirement: ($req)"
 			set rest	[lassign $req pkgname]
+			if {$pkgname eq "tbuild"} {
+				global projinfo
+				my _load_projfile
+
+				dict set file_list tm/tcl/tbuild-1.0.tm [string map [dict create \
+						%name%	[list $name] \
+						%version%	[list [dict get $projinfo applications $name version]] \
+				] {
+					namespace eval tbuild {
+						variable name		%name%
+						variable version	%version%
+					}
+				}]
+				continue
+			}
 			if {
 				[dict exists $::package_manifest $pkgname] &&
 				([llength $rest] == 0 ||
@@ -452,7 +508,7 @@ source $main
 
 					if {$type eq "tm"} { #<<<
 						set sub_requires	[my _extract_tm_requires $path]
-						set sub_file_list	[my _resolve_packages $sub_requires $compatible_platforms]
+						set sub_file_list	[my _resolve_packages $sub_requires $compatible_platforms $name]
 						set file_list	[dict merge \
 								$file_list \
 								$sub_file_list \
@@ -711,6 +767,42 @@ source $main
 
 	#>>>
 	method _install_app {name} { #<<<
+		global projinfo
+
+		my _refresh_build $name
+		dict with projinfo applications $name {
+			set src_fn_base	[dict get $::tbuildconf app_build]
+			set dst_fn_base	[file join [dict get $::tbuildconf repo_base] apps]
+
+			set target_platforms	[dict keys $platforms]
+			if {[llength $target_platforms] == 0} {
+				fail "No platforms specified"
+			}
+
+			foreach platform $target_platforms {
+				set src_fn	[file join \
+						$src_fn_base \
+						$platform \
+						$name \
+				]
+				if {![file exists $src_fn]} {
+					puts stderr "WARNING: Expecting \"$src_fn\" but it wasn't built"
+					continue
+				}
+
+				set dst_fn_dir	[file dirname [file join $dst_fn_base $platform $name]]
+				if {![file exists $dst_fn_dir]} {
+					file mkdir $dst_fn_dir
+				}
+
+				try {
+					file copy -force $src_fn $dst_fn_dir
+					puts "Installed app $name in $dst_fn_dir"
+				} on error {errmsg options} {
+					fail "Error installing tm $name: $errmsg"
+				}
+			}
+		}
 	}
 
 	#>>>
@@ -781,7 +873,8 @@ source $main
 				#unset rpm
 
 				set files	{}
-				set out_app_base	[file join [dict get $::tbuildconf repo_base] apps $platform]
+				#set out_app_base	[file join [dict get $::tbuildconf repo_base] apps $platform]
+				set out_app_base	[file join [dict get $::tbuildconf app_build] $platform]
 				dict for {appname installpath} [dict get $rpminfo appfiles] {
 					set app_src		[file join $out_app_base $appname]
 					lappend files	$app_src $installpath
@@ -1227,7 +1320,7 @@ source $main
 		set catmap	{
 			tms				tm
 			pkgs			pkg
-			applications	apps
+			applications	app
 		}
 
 		foreach category {tms pkgs applications} {
@@ -1366,6 +1459,7 @@ source $main
 		set cfg	[cflib::config new $args [subst {
 			variable platform	[list [dict get $::tbuildconf default_platform]]
 			variable runtime	[list [dict get $::tbuildconf default_runtime]]
+			variable runprefix	{}
 		}]]
 		set args	[$cfg rest]
 		set platform	[$cfg get platform]
@@ -1416,8 +1510,9 @@ if {$app ne ""} {
 		}]
 		chan close $fp
 		set exitstatus	0
+		set runprefix	[$cfg get runprefix]
 		try {
-			exec $runtime_path $launcherfn {*}$args >@ stdout 2>@ stderr <@ stdin
+			exec {*}$runprefix $runtime_path $launcherfn {*}$args >@ stdout 2>@ stderr <@ stdin
 		} trap {CHILDSTATUS} {errmsg options} {
 			lassign [dict get $options -errorcode] code pid status
 			set exitstatus	$status
