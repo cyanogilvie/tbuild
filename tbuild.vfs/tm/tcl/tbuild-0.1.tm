@@ -70,8 +70,18 @@ set tbuildconf [dict create \
 	tm_build			tm \
 	app_build			app \
 	repo_base			[file join $::env(HOME) .tbuild repo] \
-	default_runtime		cfkit* \
+	default_runtime		cfkit8.6 \
 	default_platform	linux-glibc2.9-x86_64 \
+	debupload {
+		{debfile} {
+			puts stderr "No upload script specified"
+		}
+	} \
+	rpmupload {
+		{rpmfile} {
+			puts stderr "No upload script specified"
+		}
+	} \
 ]
 
 foreach file [list \
@@ -79,8 +89,8 @@ foreach file [list \
 		[file join $env(HOME) .tbuild config] \
 		[file join $dir .tbuild config] \
 ] {
-	if {[file exists $file] && [file isreadable $file]} {
-		set tbuildconf	[dict merge $tbuildconf [readfile $file]]
+	if {[file exists $file] && [file readable $file]} {
+		set tbuildconf	[dict merge $tbuildconf [decomment [readfile $file]]]
 	}
 }
 # Build tbuildconf >>>
@@ -352,14 +362,59 @@ try {
 					}
 					set app_name		[file join $out_app_base $name]
 					set app_name_static	[file join $out_app_base ${name}-static]
-					if {"starkit" in [dict get $runtime_info builtin_packages]} {
+					set fs		""
+					switch -- [dict get $appsettings fs] {
+						auto {
+							if {"starkit" in [dict get $runtime_info builtin_packages]} {
+								set fs	"starkit"
+							} elseif {"rozfs" in [dict get $runtime_info builtin_packages]} {
+								set fs	"rozfs"
+							} elseif {"trofs" in [dict get $runtime_info builtin_packages]} {
+								set fs	"trofs"
+							} else {
+								puts stderr "Need at least one of starkit, rozfs or trofs support in the runtime \"$runtime\""
+								exit 2
+							}
+						}
+
+						starkit {
+							if {"starkit" ni [dict get $runtime_info builtin_packages]} {
+								puts stderr "starkit requested, but selected runtime \"$runtime\" doesn't support it"
+								exit 2
+							}
+							set fs	"starkit"
+						}
+
+						rozfs {
+							if {"rozfs" ni [dict get $runtime_info builtin_packages]} {
+								puts stderr "rozfs requested, but selected runtime \"$runtime\" doesn't support it"
+								exit 2
+							}
+							set fs	"rozfs"
+						}
+
+						trofs {
+							if {"trofs" ni [dict get $runtime_info builtin_packages]} {
+								puts stderr "trofs requested, but selected runtime \"$runtime\" doesn't support it"
+								exit 2
+							}
+							set fs	"trofs"
+						}
+
+						default {
+							puts stderr "Invalid fs requested: \"[dict get $appsettings fs]\""
+							exit 2
+						}
+					}
+					puts "Building app using filesystem: \"$fs\" ([dict get $appsettings fs])"
+					if {$fs eq "starkit"} {
 						puts "Writing application \"$app_name\""
 						exec -- sdx wrap $app_name -vfs $name.vfs -interp [file tail $runtime_path]
 						if {$platform ne "tcl"} {
 							puts "Writing application \"$app_name_static\""
 							exec -- sdx wrap $app_name_static -vfs $name.vfs -runtime $runtime_path
 						}
-					} elseif {"rozfs" in [dict get $runtime_info builtin_packages]} {
+					} elseif {$fs eq "rozfs"} {
 						package require rozfsutils
 
 						set header	""
@@ -397,7 +452,7 @@ source $main
 						if {$platform ne "tcl"} {
 							# TODO: merge $name.vfs with boot trofs
 						}
-					} elseif {"trofs" in [dict get $runtime_info builtin_packages]} {
+					} elseif {$fs eq "trofs"} {
 						package require trofs
 
 						set header	""
@@ -807,7 +862,7 @@ source $main
 
 	#>>>
 	method rpm {args} { #<<<
-		package require rpm
+		package require rpm 0.2
 
 		global projinfo
 		my _load_projfile
@@ -816,12 +871,21 @@ source $main
 			dict set projinfo rpms {}
 		}
 
+		set upload	0
+		if {$args eq {-upload}} {
+			set upload	1
+			set args	{}
+		}
 		if {[llength $args] == 0 || "all" in $args} {
 			set args	[dict keys [dict get $projinfo rpms]]
 		}
 
 		set built_apps	[dict create]
 		foreach name $args {
+			if {$name eq "-upload"} {
+				set upload	1
+				continue
+			}
 			set rpminfo	[dict get $projinfo rpms $name]
 			dict set rpminfo name $name
 			set runtimes	{}
@@ -891,16 +955,182 @@ source $main
 					}
 					#lappend files {*}[dict get $rpminfo files]
 				}
-				puts "files:\n[join $files \n]"
+				puts "files:"
+				foreach {s d} $files {
+					puts "$s -> $d"
+				}
 				try {
-					rpm::make_rpm $rpminfo $files $rpmtarget
+					set outfiles	[rpm::make_rpm $rpminfo $files $rpmtarget]
 				} on error {errmsg options} {
 					puts stderr "Error building rpm: $errmsg"
 					cflib::writefile /tmp/failed.spec [rpm::build_spec $rpminfo $files]
 					return -options $options $errmsg
+				} on ok {} {
+					if {$upload} {
+						my _rpmupload $outfiles
+					}
 				}
 			}
 		}
+	}
+
+	#>>>
+	method deb {args} { #<<<
+		package require deb 0.2
+
+		global projinfo
+		my _load_projfile
+
+		if {![dict exists $projinfo debs]} {
+			dict set projinfo debs {}
+		}
+
+		set upload	0
+		if {$args eq {-upload}} {
+			set upload	1
+			set args	{}
+		}
+		if {[llength $args] == 0 || "all" in $args} {
+			set args	[dict keys [dict get $projinfo debs]]
+		}
+
+		set ::deb::debug	1
+		set built_apps	[dict create]
+		foreach name $args {
+			if {$name eq "-upload"} {
+				set upload	1
+				continue
+			}
+			set debinfo	[dict get $projinfo debs $name]
+			set debsettings	[dict create]
+			dict set debinfo name $name
+			dict set debsettings %PACKAGE_NAME% $name
+			set runtimes	{}
+
+			if {[dict exists $debinfo postinst]} {
+				dict set debsettings %POSTINST% [dict get $debinfo postinst]
+			}
+
+			if {[dict exists $debinfo prerm]} {
+				dict set debsettings %PRERM% [dict get $debinfo prerm]
+			}
+
+			dict for {appname installpath} [dict get $debinfo appfiles] {
+				if {![dict exists $built_apps $appname]} {
+					puts "----- building app ($appname) -----"
+					my _build_application $appname
+					dict set built_apps $appname 1
+				}
+				lappend runtimes	[dict get $projinfo applications $appname runtime]
+			}
+			set runtimes	[lsort -unique $runtimes]
+
+			if {![dict exists $debinfo target] || [dict size [dict get $debinfo target]] == 0} {
+				puts stderr "No targets defined for deb \"$name\""
+				exit 1
+			}
+			try {
+				string trim [exec dpkg --print-architecture]
+			} on ok {myarch} {}
+			dict for {debtarget platform} [dict get $debinfo target] {
+				if {$debtarget ne $myarch && $debtarget ne "all"} continue
+				puts "building deb \"$name\", debtarget: ($debtarget) platform: ($platform)"
+
+				if {![dict exists $debinfo version]} {
+					error "Must define deb version"
+				}
+				dict set debsettings %VERSION% [dict get $debinfo version]
+				if {[dict exists $debinfo revision]} {
+					dict set debsettings %REVISION% [dict get $debinfo revision]
+				}
+				if {![dict exists $debinfo summary]} {
+					error "Require summary to be defined to build an deb"
+				}
+				dict set debsettings %SUMMARY% [dict get $debinfo summary]
+				if {![dict exists $debinfo description]} {
+					error "Require description to be defined to build an deb"
+				}
+				dict set debsettings %DESCRIPTION% [dict get $debinfo description]
+				set reqs	[dict get $debinfo requires]
+				foreach runtime $runtimes {
+					switch -glob -- $runtime {
+						"*cfkit*" {
+							lappend reqs	"cfkit"
+						}
+
+						"*kbskit*" {
+							lappend reqs	"kbskit"
+						}
+					}
+				}
+				dict set debinfo requires [lsort -unique $reqs]
+				dict set debsettings %DEPENDS% [dict get $debinfo requires]
+
+				#if {[info exists deb]} {unset deb}
+				#array set deb $debinfo
+				#puts "deb settings:"
+				#parray deb
+				#unset deb
+
+				set files	{}
+				#set out_app_base	[file join [dict get $::tbuildconf repo_base] apps $platform]
+				set out_app_base	[file join [dict get $::tbuildconf app_build] $platform]
+				dict for {appname installpath} [dict get $debinfo appfiles] {
+					set app_src		[file join $out_app_base $appname]
+					lappend files	$app_src $installpath
+				}
+				if {[dict exists $debinfo files]} {
+					foreach {pattern dst} [dict get $debinfo files] {
+						foreach match [glob -nocomplain $pattern] {
+							if {[string index $dst end] eq "/"} {
+								lappend files	$match [file join $dst [file tail $match]]
+							} else {
+								lappend files	$match $dst
+							}
+						}
+					}
+					#lappend files {*}[dict get $debinfo files]
+				}
+				puts "files:"
+				set file_data	[dict create]
+				foreach {s d} $files {
+					puts "$s -> $d"
+					dict set file_data	$d perms [file attributes $s -permissions]
+					dict set file_data	$d data [cflib::readfile $s binary]
+				}
+				try {
+					deb::make_deb $debsettings $file_data
+				} on error {errmsg options} {
+					puts stderr "Error building deb: $errmsg"
+					return -options $options $errmsg
+				} on ok {deboutput} {
+					lassign $deboutput deb_fn deb_data
+					if {![file exists debout]} {
+						file mkdir debout
+					}
+					cflib::writefile [file join debout $deb_fn] $deb_data binary
+					puts "Wrote [file join debout $deb_fn]"
+					if {$upload} {
+						puts "Attempting to upload [file join debout $deb_fn]"
+						my _debupload [file join debout $deb_fn]
+					} else {
+						puts "Not uploading"
+					}
+				}
+			}
+		}
+	}
+
+	#>>>
+	method _rpmupload {fn} { #<<<
+		set script	[getkey $::tbuildconf rpmupload]
+		apply $script $fn
+	}
+
+	#>>>
+	method _debupload {fn} { #<<<
+		set script	[getkey $::tbuildconf debupload]
+		apply $script $fn
 	}
 
 	#>>>
@@ -968,6 +1198,7 @@ source $main
 
 				dict set projinfo tms $name {
 					platforms	{}
+					build_commands	{}
 				}
 
 				dsl_eval proj {
@@ -1027,6 +1258,18 @@ source $main
 					}
 
 					#>>>
+					build {cx shellscript} { #<<<
+						set cmds	[dict get $::projinfo {*}$cx build_commands]
+						lappend cmds $shellscript
+						dict set ::projinfo {*}$cx build_commands $cmds
+						try {
+							exec /bin/sh -c $shellscript
+						} on error {errmsg} {
+							puts stderr "Error running buildscript: $errmsg\n$cmd"
+							exit 1
+						}
+					}
+					#>>>
 				} $script [list tms $name]
 			}
 
@@ -1036,6 +1279,7 @@ source $main
 
 				dict set projinfo applications $name {
 					platforms	{}
+					fs			{auto}
 				}
 
 				dsl_eval proj {
@@ -1112,6 +1356,11 @@ source $main
 					#>>>
 					choose_package {cx script} { #<<<
 						dict set ::projinfo {*}$cx choose_package $script
+					}
+
+					#>>>
+					fs {cx fs} { #<<<
+						dict set ::projinfo {*}$cx fs $fs
 					}
 
 					#>>>
@@ -1303,6 +1552,126 @@ source $main
 			}
 
 			#>>>
+			deb {name settings} { #<<<
+				dict set ::projinfo debs $name {
+					target			{}
+					release			1
+					license			"commercial"
+					vendor			"Codeforge"
+					section			"utils"
+					sourcetar		"tbuild_tmp_source.tar.gz"
+					requires		{}
+					post_scriptlet	""
+					preun_scriptlet	""
+					appfiles		{}
+				}
+				dsl_eval proj {
+					version {cx version} { #<<<
+						dict set ::projinfo {*}$cx version $version
+					}
+
+					#>>>
+					summary {cx summary} { #<<<
+						dict set ::projinfo {*}$cx summary $summary
+					}
+
+					#>>>
+					description {cx desc} { #<<<
+						set trimmed	{}
+						foreach line [split [string trim $desc] \n] {
+							lappend trimmed	[string trim $line]
+						}
+						dict set ::projinfo {*}$cx description [join $trimmed \n]
+					}
+
+					#>>>
+					target {cx target platform} { #<<<
+						dict set ::projinfo {*}$cx target $target $platform
+					}
+
+					#>>>
+					release {cx rel} { #<<<
+						dict set ::projinfo {*}$cx release $rel
+					}
+
+					#>>>
+					license {cx lic} { #<<<
+						dict set ::projinfo {*}$cx license $lic
+					}
+
+					#>>>
+					vendor {cx vendor} { #<<<
+						dict set ::projinfo {*}$cx vendor $vendor
+					}
+
+					#>>>
+					group {cx group} { #<<<
+						dict set ::projinfo {*}$cx group $group
+					}
+
+					#>>>
+					debrequires {cx req} { #<<<
+						dict set ::projinfo {*}$cx requires $req
+					}
+
+					#>>>
+					applications {cx applist} { #<<<
+						package require sugar
+						set appfiles	{}
+						foreach cmdraw [sugar::scriptToList $applist] {
+							set cmd	{}
+							foreach token $cmdraw {
+								lassign $token type val
+
+								if {$type eq "TOK"} {
+									lappend cmd $val
+								}
+							}
+
+							switch -- [llength $cmd] {
+								0 {continue}
+
+								1 {
+									lappend cmd	[file join / usr bin [lindex $cmd 0]]
+								}
+
+								2 {}
+
+								default {
+									error "Invalid syntax for deb application list: ($cmd)"
+								}
+							}
+
+							lappend appfiles	{*}$cmd
+						}
+						dict set ::projinfo {*}$cx appfiles $appfiles
+					}
+
+					#>>>
+					postinst {cx scr} { #<<<
+						dict set ::projinfo {*}$cx postinst $scr
+					}
+
+					#>>>
+					prerm {cx scr} { #<<<
+						dict set ::projinfo {*}$cx prerm $scr
+					}
+
+					#>>>
+					files {cx files} { #<<<
+						dict set ::projinfo {*}$cx files $files
+					}
+
+					#>>>
+					include {cx fn} { #<<<
+						return [cflib::readfile $fn]
+					}
+
+					#>>>
+				} $settings [list debs $name]
+			}
+
+			#>>>
 		} [readfile $conffile]
 
 		interp delete proj
@@ -1332,7 +1701,17 @@ source $main
 			}
 		}
 
-		return [concat {*}[lsort -unique $targets]]
+		set tms		{}
+		set pkgs	{}
+		set apps	{}
+		foreach {cat target} [concat {*}[lsort -unique $targets]] {
+			switch -- $cat {
+				tm	{lappend tms	$cat $target}
+				pkg	{lappend pkgs	$cat $target}
+				app	{lappend apps	$cat $target}
+			}
+		}
+		return [concat $tms $pkgs $apps]
 	}
 
 	#>>>

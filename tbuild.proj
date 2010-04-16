@@ -9,7 +9,8 @@ application "tbuild" {
 		trofs
 		sugar
 		platform
-		rpm
+		{rpm 0.2}
+		deb
 		rozfsutils
 	}
 
