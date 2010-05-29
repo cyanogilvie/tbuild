@@ -12,6 +12,7 @@ application "tbuild" {
 		{rpm 0.2}
 		deb
 		rozfsutils
+		rozfs
 	}
 
 	files {

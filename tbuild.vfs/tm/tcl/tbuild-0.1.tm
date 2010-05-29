@@ -271,13 +271,13 @@ try {
 					set _init.tcl_data		{}
 					set include_packages	{}
 					foreach req [dict get $appsettings requires] {
-						lappend _init.tcl_data	[list package require {*}$req]
+						#lappend _init.tcl_data	[list package require {*}$req]
 						lappend include_packages $req
 					}
 					if {[dict exists $platformsettings requires]} {
 						foreach req [dict get $platformsettings requires] {
 							puts stderr "Adding specific platform require: ($req) for $platform"
-							lappend _init.tcl_data	[list package require {*}$req]
+							#lappend _init.tcl_data	[list package require {*}$req]
 							lappend include_packages $req
 						}
 					}
@@ -1093,7 +1093,7 @@ source $main
 				}
 				puts "files:"
 				set file_data	[dict create]
-				foreach {s d} $files {
+				foreach {s d} [my _expand_files $files] {
 					puts "$s -> $d"
 					dict set file_data	$d perms [file attributes $s -permissions]
 					dict set file_data	$d data [cflib::readfile $s binary]
@@ -1119,6 +1119,29 @@ source $main
 				}
 			}
 		}
+	}
+
+	#>>>
+	method _expand_file {s d} { #<<<
+		set results	{}
+		if {[file type $s] eq "directory"} {
+			foreach child [glob -nocomplain [file join $s *]] {
+				set tail	[file tail $child]
+				lappend results {*}[my _expand_file $child [file join $d $tail]]
+			}
+		} else {
+			lappend results	$s $d
+		}
+		set results
+	}
+
+	#>>>
+	method _expand_files {files} { #<<<
+		set expanded_files	{}
+		foreach {s d} $files {
+			lappend expanded_files	{*}[my _expand_file $s $d]
+		}
+		set expanded_files
 	}
 
 	#>>>
@@ -1722,6 +1745,7 @@ source $main
 			puts stderr "Invalid path: \"$path\""
 			exit 1
 		}
+		set fqpath	[file normalize $path]
 
 		# Special case: win32 runtime on a linux host that can run it with
 		# wine (works - how to accomodate it?)
@@ -1734,7 +1758,7 @@ source $main
 
 		lassign [chan pipe] readpipe writepipe
 
-		set handle	[open [list |$path >@ $writepipe] w]
+		set handle	[open [list |$fqpath >@ $writepipe] w]
 		close $writepipe
 		chan configure $handle -blocking 0
 		puts -nonewline $handle {
@@ -2022,7 +2046,7 @@ if {$app ne ""} {
 }
 
 if {[llength $argv] == 0} {
-	fail "No action specified"
+	set argv	[list "build"]
 }
 
 set actionargs	[lassign $argv action]
