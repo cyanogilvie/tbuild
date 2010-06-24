@@ -11,8 +11,9 @@ application "tbuild" {
 		platform
 		{rpm 0.2}
 		deb
-		rozfsutils
 		rozfs
+		rozfsutils
+		sop
 	}
 
 	files {

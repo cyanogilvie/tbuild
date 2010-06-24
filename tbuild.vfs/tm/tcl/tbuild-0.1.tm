@@ -1,4 +1,20 @@
 #!/usr/bin/env cfkit8.6
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+if {![info exists ::tcl::basekit]} {
+	package require platform
+
+	foreach platform [platform::patterns [platform::identify]] {
+		set tm_path		[file join $env(HOME) .tbuild repo tm $platform]
+		set pkg_path	[file join $env(HOME) .tbuild repo pkg $platform]
+		if {[file exists $tm_path]} {
+			tcl::tm::path add $tm_path
+		}
+		if {[file exists $pkg_path]} {
+			lappend auto_path $pkg_path
+		}
+	}
+}
 
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
@@ -367,10 +383,10 @@ try {
 						auto {
 							if {"starkit" in [dict get $runtime_info builtin_packages]} {
 								set fs	"starkit"
-							} elseif {"rozfs" in [dict get $runtime_info builtin_packages]} {
-								set fs	"rozfs"
 							} elseif {"trofs" in [dict get $runtime_info builtin_packages]} {
 								set fs	"trofs"
+							} elseif {"rozfs" in [dict get $runtime_info builtin_packages]} {
+								set fs	"rozfs"
 							} else {
 								puts stderr "Need at least one of starkit, rozfs or trofs support in the runtime \"$runtime\""
 								exit 2
