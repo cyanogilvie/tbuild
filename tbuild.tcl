@@ -1,7 +1,7 @@
 #!/usr/bin/env cfkit8.6
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
-if {![info exists ::tcl::basekit]} {
+if {[file system [info script]] eq "native"} {
 	package require platform
 
 	foreach platform [platform::patterns [platform::identify]] {
@@ -584,7 +584,7 @@ source $main
 								$file_list \
 								$sub_file_list \
 						]
-						set path_rel	[my _strip_base [dict get $::tbuildconf repo_base] $path]
+						set path_rel	[my _strip_base $path]
 
 						dict set file_list $path_rel [readfile $path binary]
 						dict set ::package_manifest $pkgname $ver
@@ -593,7 +593,7 @@ source $main
 					} elseif {$type eq "pkg"} { #<<<
 						foreach file [my _list_files_recursive $path] {
 							puts "Addling file ($file)"
-							set file_rel	[my _strip_base [dict get $::tbuildconf repo_base] $file]
+							set file_rel	[my _strip_base $file]
 							dict set file_list $file_rel [readfile $file binary]
 						}
 						dict set ::package_manifest $pkgname $ver
@@ -620,17 +620,17 @@ source $main
 	}
 
 	#>>>
-	method _strip_base {base path} { #<<<
-		set fqfn_base	[fullynormalize $base]
-		set fqfn_path	[fullynormalize $path]
-		set baselen	[string length $fqfn_base]
-		set prefix	[string range $fqfn_path 0 $baselen-1]
-		if {$prefix ne $fqfn_base} {
-			puts "fqfn_base: ($fqfn_base)"
-			puts "fqfn_path: ($fqfn_path)"
-			error "\"$path\" isn't contained in \"$base\""
+	method _strip_base {path} { #<<<
+		set bases	[list [dict get $::tbuildconf repo_base] $::dir]
+		foreach base $bases {
+			set fqfn_base	[fullynormalize $base]
+			set fqfn_path	[fullynormalize $path]
+			set baselen	[string length $fqfn_base]
+			set prefix	[string range $fqfn_path 0 $baselen-1]
+			if {$prefix ne $fqfn_base} continue
+			return [string range $fqfn_path $baselen+1 end]
 		}
-		string range $fqfn_path $baselen+1 end
+		error "\"$path\" isn't contained in any of $bases"
 	}
 
 	#>>>
@@ -686,50 +686,54 @@ source $main
 
 		# Look for tm
 		foreach plat $compatible_platforms {
-			if {$tm_prefix ne "."} {
-				set tm_path		[file join $repo_base tm $plat $tm_prefix]
-			} else {
-				set tm_path		[file join $repo_base tm $plat]
-			}
-			foreach match [glob -nocomplain -type f [file join $tm_path $tm_pkg-*.tm]] {
-				if {![regexp {^([[:alpha:]][:[:alnum:]]*)-([[:digit:]].*)\.tm$} [file tail $match] -> name version]} continue
-				if {
-					[llength $rest] == 0 ||
-					[package vsatisfies $version {*}$rest]
-				} {
-					lappend available [list $version tm $match]
+			foreach loc [list $::dir $repo_base] {
+				if {$tm_prefix ne "."} {
+					set tm_path		[file join $loc tm $plat $tm_prefix]
+				} else {
+					set tm_path		[file join $loc tm $plat]
+				}
+				foreach match [glob -nocomplain -type f [file join $tm_path $tm_pkg-*.tm]] {
+					if {![regexp {^([[:alpha:]][[:alnum:]]*)-([[:digit:]].*)\.tm$} [file tail $match] -> name version]} continue
+					if {
+						[llength $rest] == 0 ||
+						[package vsatisfies $version {*}$rest]
+					} {
+						lappend available [list $version tm $match]
+					}
 				}
 			}
 		}
 
 		# Look for package
 		foreach plat $compatible_platforms {
-			set pkg_path		[file join $repo_base pkg $plat]
-			foreach pkgIndex [glob -nocomplain -type f [file join $pkg_path * pkgIndex.tcl]] {
-				package require sugar
-				foreach cmdraw [sugar::scriptToList [readfile $pkgIndex]] {
-					set cmd	{}
-					foreach token $cmdraw {
-						lassign $token type val
-						if {$type eq "TOK"} {
-							lappend cmd $val
+			foreach loc [list $::dir $repo_base] {
+				set pkg_path		[file join $loc pkg $plat]
+				foreach pkgIndex [glob -nocomplain -type f [file join $pkg_path * pkgIndex.tcl]] {
+					package require sugar
+					foreach cmdraw [sugar::scriptToList [readfile $pkgIndex]] {
+						set cmd	{}
+						foreach token $cmdraw {
+							lassign $token type val
+							if {$type eq "TOK"} {
+								lappend cmd $val
+							}
 						}
-					}
 
-					if {[lrange $cmd 0 2] eq [list package ifneeded $pkgname]} {
-						set offered_version	[lindex $cmd 3]
-						if {
-							[llength $rest] == 0 ||
-							[package vsatisfies $offered_version {*}$rest]
-						} {
-							lappend available	[list $offered_version pkg [file dirname $pkgIndex]]
+						if {[lrange $cmd 0 2] eq [list package ifneeded $pkgname]} {
+							set offered_version	[lindex $cmd 3]
+							if {
+								[llength $rest] == 0 ||
+								[package vsatisfies $offered_version {*}$rest]
+							} {
+								lappend available	[list $offered_version pkg [file dirname $pkgIndex]]
+							}
 						}
 					}
 				}
 			}
 		}
 
-		return [lsort -unique -decreasing -command [list apply {
+		lsort -unique -decreasing -command [list apply {
 			{a b} {
 				set aver	[lindex $a 0]
 				set bver	[lindex $b 0]
@@ -748,7 +752,7 @@ source $main
 				}
 				return $sort
 			}
-		}] $available]
+		}] $available
 	}
 
 	#>>>
@@ -992,7 +996,7 @@ source $main
 
 	#>>>
 	method deb {args} { #<<<
-		package require deb 0.2
+		package require deb 0.3
 
 		global projinfo
 		my _load_projfile
