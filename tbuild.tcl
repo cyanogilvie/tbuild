@@ -265,6 +265,10 @@ try {
 	puts stderr "$errmsg\n[dict get $options -errorinfo]"
 	#puts stderr "auto_path:\n\t[join $::auto_path \n\t]"
 	#puts stderr "tm path:\n\t[join [tcl::tm::path list] \n\t]"
+} on ok {} {
+	if {[info exists ::tbuild::app_res]} {
+		return -options $::tbuild::app_options $::tbuild::app_res
+	}
 }
 }]
 
@@ -298,7 +302,14 @@ try {
 						}
 					}
 					lappend _init.tcl_data [list package provide app-$name [dict get $appsettings version]]
-					lappend _init.tcl_data "source \[file join \[file dirname \[info script\]\] [list $entrypoint]]"
+					lappend _init.tcl_data [format {
+						try {
+							source [file join [file dirname [info script]] %s]
+						} on ok {res options} {
+							namespace eval ::tbuild [list variable app_res $res]
+							namespace eval ::tbuild [list variable app_options $options]
+						}
+					} [list $entrypoint]]
 
 					writefile [file join $app_base _init.tcl] \
 							[join [set _init.tcl_data] "\n"]
@@ -698,7 +709,7 @@ source $main
 						[llength $rest] == 0 ||
 						[package vsatisfies $version {*}$rest]
 					} {
-						lappend available [list $version tm $match]
+						lappend available [list $version tm $match $loc]
 					}
 				}
 			}
@@ -725,7 +736,7 @@ source $main
 								[llength $rest] == 0 ||
 								[package vsatisfies $offered_version {*}$rest]
 							} {
-								lappend available	[list $offered_version pkg [file dirname $pkgIndex]]
+								lappend available	[list $offered_version pkg [file dirname $pkgIndex] $loc]
 							}
 						}
 					}
@@ -743,7 +754,16 @@ source $main
 					set atype	[lindex $a 1]
 					set btype	[lindex $b 1]
 					if {$atype eq $btype} {
-						return 0
+						# Prefer local to packages installed in the repo
+						set aloc	[expr {[lindex $a 3] eq $::dir}]
+						set bloc	[expr {[lindex $b 3] eq $::dir}]
+						if {$aloc == $bloc} {
+							return 0
+						} elseif {$aloc} {
+							return 1
+						} else {
+							return -1
+						}
 					} elseif {$atype eq "tm" && $btype ne "tm"} {
 						return 1
 					} elseif {$atype ne "tm" && $btype eq "tm"} {
@@ -865,14 +885,23 @@ source $main
 					continue
 				}
 
-				set dst_fn_dir	[file dirname [file join $dst_fn_base $platform $name]]
+				if {[dict exists $platforms $platform install]} {
+					set dst_fn	[dict get $platforms $platform install]
+					if {[string index $dst_fn end] eq "/"} {
+						set dst_fn	[file join $dst_fn $name]
+					}
+				} else {
+					set dst_fn	[file join $dst_fn_base $platform $name]
+				}
+				set dst_fn_dir	[file dirname $dst_fn]
+
 				if {![file exists $dst_fn_dir]} {
 					file mkdir $dst_fn_dir
 				}
 
 				try {
-					file copy -force $src_fn $dst_fn_dir
-					puts "Installed app $name in $dst_fn_dir"
+					file copy -force $src_fn $dst_fn
+					puts "Installed app $name as $dst_fn"
 				} on error {errmsg options} {
 					fail "Error installing tm $name: $errmsg"
 				}
@@ -1390,6 +1419,11 @@ source $main
 						dsl_eval proj {
 							requires {cx packagelist} { #<<<
 								dict set ::projinfo {*}$cx requires $packagelist
+							}
+
+							#>>>
+							install {cx install_dest} { #<<<
+								dict set ::projinfo {*}$cx install $install_dest
 							}
 
 							#>>>
