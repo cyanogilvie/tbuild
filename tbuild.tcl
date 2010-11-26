@@ -87,7 +87,8 @@ set tbuildconf [dict create \
 	app_build			app \
 	repo_base			[file join $::env(HOME) .tbuild repo] \
 	default_runtime		cfkit8.6 \
-	default_platform	linux-glibc2.9-x86_64 \
+	default_platform	[platform::identify] \
+	debug				0 \
 	debupload {
 		{debfile} {
 			puts stderr "No upload script specified"
@@ -99,7 +100,6 @@ set tbuildconf [dict create \
 		}
 	} \
 ]
-
 foreach file [list \
 		[file join / etc tbuild.conf] \
 		[file join $env(HOME) .tbuild config] \
@@ -110,6 +110,12 @@ foreach file [list \
 	}
 }
 # Build tbuildconf >>>
+
+if {[dict get $tbuildconf debug]} {
+	proc ?? {script} {uplevel 1 $script}
+} else {
+	proc ?? {args} {}
+}
 
 oo::object create actions
 oo::objdefine actions {
@@ -597,6 +603,7 @@ source $main
 						]
 						set path_rel	[my _strip_base $path]
 
+						?? {puts "slurping \"$pkgname\"\[$ver\] ($path) as ($path_rel)"}
 						dict set file_list $path_rel [readfile $path binary]
 						dict set ::package_manifest $pkgname $ver
 						throw {found} ""
@@ -744,6 +751,7 @@ source $main
 			}
 		}
 
+		try {
 		lsort -unique -decreasing -command [list apply {
 			{a b} {
 				set aver	[lindex $a 0]
@@ -773,6 +781,10 @@ source $main
 				return $sort
 			}
 		}] $available
+		} on ok {res} {
+			?? {puts "returning:\n\t[join $res \n\t]"}
+			set res
+		}
 	}
 
 	#>>>
