@@ -23,10 +23,9 @@ set dir	[pwd]
 package require cflib
 package require platform
 
-namespace eval cflib {
-	namespace export *
-}
-namespace import cflib::*
+namespace path [concat [namespace path] {
+	::cflib
+}]
 
 proc fail {msg} { #<<<
 	puts stderr $msg
@@ -141,7 +140,7 @@ oo::objdefine actions {
 		}
 
 		if {$istm} {
-			my _build_tm $name {*}$args
+			my build_tm $name {*}$args
 		}
 		
 		if {$ispkg} {
@@ -150,7 +149,7 @@ oo::objdefine actions {
 
 		if {$isapp} {
 			try {
-				my _build_application $name {*}$args
+				my build_application $name {*}$args
 			} on error {errmsg options} {
 				puts stderr "Uncaught error building application \"$name\": [dict get $errorinfo]"
 				exit 3
@@ -159,7 +158,7 @@ oo::objdefine actions {
 	}
 
 	#>>>
-	method _build_tm {name args} { #<<<
+	method build_tm {name args} { #<<<
 		global projinfo
 		my _load_projfile
 
@@ -204,8 +203,8 @@ oo::objdefine actions {
 			}
 			if {"-compress" in $args} {
 				set oldsize	[string length $tm_data]
-				set compressed [string map [list "\u001a" "\\u001a"] [zlib deflate $tm_data 3]]
-				set tm_data	[list eval zlib inflate $compressed]
+				set compressed [zlib deflate [encoding convertto utf-8 [string map [list "\u001a" "\\u001a"] $tm_data]] 3]
+				set tm_data	"eval \[encoding convertfrom utf-8 \[zlib inflate [list $compressed]\]\]"
 				set newsize	[string length $tm_data]
 				puts "Compressed $tm_name $oldsize -> $newsize"
 			}
@@ -215,7 +214,7 @@ oo::objdefine actions {
 	}
 
 	#>>>
-	method _build_application {name args} { #<<<
+	method build_application {name args} { #<<<
 		global projinfo
 		my _load_projfile
 
@@ -238,13 +237,13 @@ oo::objdefine actions {
 					}
 
 					set main.tcl_data [string map $tokens {
-if {[catch {
-	package require starkit
-}]} {
-	set have_starkit	0
-} else {
-	set have_starkit	1
-}
+#if {[catch {
+#	package require starkit
+#}]} {
+#	set have_starkit	0
+#} else {
+#	set have_starkit	1
+#}
 package require platform
 
 apply {
@@ -263,7 +262,11 @@ apply {
 	}
 }
 
-if {$have_starkit && [starkit::startup] eq "sourced"} return
+#puts stderr "have_starkit: ($have_starkit)"
+#if {$have_starkit} {
+#	puts stderr "starkit::startup: [starkit::startup]"
+#}
+#if {$have_starkit && [starkit::startup] eq "sourced"} return
 
 try {
 	package require app-[apply {{argv} %choose_package%} $argv]
@@ -352,6 +355,7 @@ try {
 						if {![file exists $file_dir]} {
 							file mkdir $file_dir
 						}
+						?? {puts "reading \"$src_fn\""}
 						set file_contents	[readfile $src_fn binary]
 						writefile $file_dest $file_contents binary
 					}
@@ -398,10 +402,10 @@ try {
 					set fs		""
 					switch -- [dict get $appsettings fs] {
 						auto {
-							if {"starkit" in [dict get $runtime_info builtin_packages]} {
-								set fs	"starkit"
-							} elseif {"trofs" in [dict get $runtime_info builtin_packages]} {
+							if {"trofs" in [dict get $runtime_info builtin_packages]} {
 								set fs	"trofs"
+							} elseif {"starkit" in [dict get $runtime_info builtin_packages]} {
+								set fs	"starkit"
 							} elseif {"rozfs" in [dict get $runtime_info builtin_packages]} {
 								set fs	"rozfs"
 							} else {
@@ -432,6 +436,10 @@ try {
 								exit 2
 							}
 							set fs	"trofs"
+						}
+
+						zipfs_inline {
+							set fs	"zipfs_inline"
 						}
 
 						default {
@@ -514,6 +522,35 @@ source $main
 						if {$platform ne "tcl"} {
 							# TODO: merge $name.vfs with boot trofs
 						}
+					} elseif {$fs eq "zipfs_inline"} {
+						package require zip
+						set zipdata	[apply {
+							{basedir} {
+								set old	[pwd]
+								try {
+									cd $basedir
+									zip::mkzipdata -directory .
+								} finally {
+									cd $old
+								}
+							}
+						} $name.vfs]
+						set header	""
+						append header	"#!/bin/sh\n"
+						append header	"# \\\n"
+						append header	[string map [list %r $runtime_name] {exec "%r" "$0" ${1+"$@"}}] "\n"
+						append header	[format {
+package require stringchan
+package require vfs::zip 1.0.3.1
+source [file join [apply {
+	{} {
+		set mountpoint	zip://[incr ::_zipfs_inline_seq]
+		vfs::zip::MountChan [chan create read [stringchan new [binary decode base64 %s]]] $mountpoint -volume
+		set mountpoint
+	}
+}] main.tcl]
+} [binary encode base64 $zipdata]]
+						cflib::writefile $app_name $header binary
 					}
 				} on error {errmsg options} {
 					puts stderr "Uncaught error building \"$name\" for platform \"$platform\":\n[dict get $options -errorinfo]"
@@ -536,6 +573,10 @@ source $main
 				}
 				set simplename	[file tail $candidate]
 				if {[string match $runtime $simplename]} {
+					if {[dict get $info builtin_packages Tcl] eq ""} {
+						puts stderr "Corrupt version number for $runtime Tcl"
+						continue
+					}
 					lappend candidates [list \
 							[file tail $candidate] \
 							[dict get $info builtin_packages Tcl] \
@@ -550,13 +591,11 @@ source $main
 			error "No suitable runtime found matching \"$runtime\" for platform \"$platform\""
 		}
 
-		set ordered	[lsort \
+		lindex [lsort \
 				-index 1 \
 				-decreasing \
-				-command [list package vcompare] \
-				$candidates]
-
-		return [lindex $ordered 0]
+				-command {package vcompare} \
+				$candidates] 0
 	}
 
 	#>>>
@@ -703,6 +742,7 @@ source $main
 		set repo_base	[dict get $::tbuildconf repo_base]
 
 		# Look for tm
+		#puts "Looking for \"$req\" for platforms: [join $compatible_platforms ", "]"
 		foreach plat $compatible_platforms {
 			foreach loc [list $::dir $repo_base] {
 				if {$tm_prefix ne "."} {
@@ -710,8 +750,11 @@ source $main
 				} else {
 					set tm_path		[file join $loc tm $plat]
 				}
+				#puts "Looking for \"[file join $tm_path $tm_pkg-*.tm]\""
 				foreach match [glob -nocomplain -type f [file join $tm_path $tm_pkg-*.tm]] {
-					if {![regexp {^([[:alpha:]][[:alnum:]]*)-([[:digit:]].*)\.tm$} [file tail $match] -> name version]} continue
+					#puts "\tFound \"$match\""
+					if {![regexp {^([[:alpha:]][[:alnum:]_]*)-([[:digit:]].*)\.tm$} [file tail $match] -> name version]} continue
+					#puts "\t-> name: ($name) version: ($version)"
 					if {
 						[llength $rest] == 0 ||
 						[package vsatisfies $version {*}$rest]
@@ -727,6 +770,7 @@ source $main
 			foreach loc [list $::dir $repo_base] {
 				set pkg_path		[file join $loc pkg $plat]
 				foreach pkgIndex [glob -nocomplain -type f [file join $pkg_path * pkgIndex.tcl]] {
+					?? {puts "Checking for $pkgname in $pkgIndex"}
 					package require sugar
 					foreach cmdraw [sugar::scriptToList [readfile $pkgIndex]] {
 						set cmd	{}
@@ -739,11 +783,14 @@ source $main
 
 						if {[lrange $cmd 0 2] eq [list package ifneeded $pkgname]} {
 							set offered_version	[lindex $cmd 3]
+							?? {puts "found candidate: $offered_version"}
 							if {
 								[llength $rest] == 0 ||
 								[package vsatisfies $offered_version {*}$rest]
 							} {
 								lappend available	[list $offered_version pkg [file dirname $pkgIndex] $loc]
+							} else {
+								?? {puts "... doesn't satisfy requirement: $rest"}
 							}
 						}
 					}
@@ -766,7 +813,7 @@ source $main
 						set aloc	[expr {[lindex $a 3] eq $::dir}]
 						set bloc	[expr {[lindex $b 3] eq $::dir}]
 						if {$aloc == $bloc} {
-							return 0
+							return [string compare [lindex $a 2] [lindex $b 2]]
 						} elseif {$aloc} {
 							return 1
 						} else {
@@ -809,10 +856,37 @@ source $main
 			return
 		}
 
+		set allow_tm	1
+		set allow_pkg	1
+		set allow_app	1
+
 		foreach name $args {
-			set istm	[dict exists $projinfo tms $name]
-			set ispkg	[dict exists $projinfo pkgs $name]
-			set isapp	[dict exists $projinfo applications $name]
+			if {[string index $name 0] eq "-"} {
+				switch -- $name {
+					-no_app	{set allow_app 0}
+					-no_tm	{set allow_tm 0}
+					-no_pkg	{set allow_pkg 0}
+					default {
+						puts stderr "Invalid switch \"$name\""
+					}
+				}
+				continue
+			}
+			if {$allow_tm} {
+				set istm	[dict exists $projinfo tms $name]
+			} else {
+				set istm	0
+			}
+			if {$allow_pkg} {
+				set ispkg	[dict exists $projinfo pkgs $name]
+			} else {
+				set ispkg	0
+			}
+			if {$allow_app} {
+				set isapp	[dict exists $projinfo applications $name]
+			} else {
+				set isapp	0
+			}
 
 			if {!($istm || $ispkg || $isapp)} {
 				fail "No target called \"$name\""
@@ -954,7 +1028,7 @@ source $main
 			dict for {appname installpath} [dict get $rpminfo appfiles] {
 				if {![dict exists $built_apps $appname]} {
 					puts "----- building app ($appname) -----"
-					my _build_application $appname
+					my build_application $appname
 					dict set built_apps $appname 1
 				}
 				lappend runtimes	[dict get $projinfo applications $appname runtime]
@@ -1079,7 +1153,7 @@ source $main
 			dict for {appname installpath} [dict get $debinfo appfiles] {
 				if {![dict exists $built_apps $appname]} {
 					puts "----- building app ($appname) -----"
-					my _build_application $appname
+					my build_application $appname
 					dict set built_apps $appname 1
 				}
 				lappend runtimes	[dict get $projinfo applications $appname runtime]
@@ -1273,7 +1347,7 @@ source $main
 		interp create -safe proj
 
 		# TODO: Not safe - provide filtered versions of these
-		interp expose proj file
+		#interp expose proj file
 		interp expose proj glob
 
 		dsl_eval proj {
@@ -1808,7 +1882,7 @@ source $main
 		package require platform
 
 		if {![file exists $path]} {
-			puts stderr "Invalid path: \"$path\""
+			puts stderr "Invalid path: \"$path\" pwd: ([pwd])"
 			exit 1
 		}
 		set fqpath	[file normalize $path]
@@ -1832,13 +1906,14 @@ source $main
 			set runtime_info	{}
 			set builtin	{}
 			foreach package [package names] {
-				if {[catch {
-					package require $package
-				} res]} {
-					set errmsg	$res
+				try {
+					lindex [lsort -command {package vcompare} [package versions $package]] end
+				} on error {errmsg options} {
 					puts stderr "Couldn't load package: \"$package\": $errmsg"
-				} else {
-					set ver	$res
+				} on ok {ver} {
+					if {$ver eq ""} {
+						set ver	[package require $package]
+					}
 					lappend builtin $package $ver
 				}
 			}
