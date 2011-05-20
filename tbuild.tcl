@@ -26,6 +26,7 @@ package require platform
 namespace path [concat [namespace path] {
 	::cflib
 }]
+interp alias {} readfile {} ::cflib::readfile
 
 proc fail {msg} { #<<<
 	puts stderr $msg
