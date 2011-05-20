@@ -23,10 +23,7 @@ set dir	[pwd]
 package require cflib
 package require platform
 
-namespace path [concat [namespace path] {
-	::cflib
-}]
-interp alias {} readfile {} ::cflib::readfile
+namespace path {::cflib}
 
 proc fail {msg} { #<<<
 	puts stderr $msg
@@ -119,6 +116,10 @@ if {[dict get $tbuildconf debug]} {
 
 oo::object create actions
 oo::objdefine actions {
+	method init {} {
+		namespace path {::cflib}
+	}
+
 	method build {{name "all"} args} { #<<<
 		global projinfo
 		my _load_projfile
@@ -2186,6 +2187,8 @@ if {$app ne ""} {
 
 	#>>>
 }
+
+actions init
 
 if {[llength $argv] == 0} {
 	set argv	[list "build"]

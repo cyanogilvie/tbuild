@@ -1789,7 +1789,7 @@ foreach file [list \
 		[file join $env(HOME) .tbuild config] \
 		[file join $dir .tbuild config] \
 ] {
-	if {[file exists $file] && [file isreadable $file]} {
+	if {[file exists $file] && [file   readable $file]} {
 		set tbuildconf	[dict merge $tbuildconf [readfile $file]]
 	}
 }
