@@ -1837,6 +1837,18 @@ source [file join [apply {
 			}
 
 			#>>>
+			file {op args} { #<<<
+				switch -- $op {
+					tail -
+					rootname -
+					dirname -
+					extension -
+					join {file $op {*}$args}
+					default {error "Unsupported file subcommand: $op"}
+				}
+			}
+
+			#>>>
 		} [readfile $conffile]
 
 		interp delete proj
