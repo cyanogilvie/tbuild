@@ -53,8 +53,7 @@ try {
 		return -options $::tbuild::app_options $::tbuild::app_res
 	}
 }
-package ifneeded app-tbuild 0.5 [list source [file join $dir _init.tcl]]
-					package provide app-tbuild 0.5
+package provide app-tbuild 0.5
 
 						try {
 							source [file join [file dirname [info script]] tbuild.tcl]
@@ -62,6 +61,7 @@ package ifneeded app-tbuild 0.5 [list source [file join $dir _init.tcl]]
 							namespace eval ::tbuild [list variable app_res $res]
 							namespace eval ::tbuild [list variable app_options $options]
 						}
+					package ifneeded app-tbuild 0.5 [list source [file join $dir _init.tcl]]
 					#!/usr/bin/env cfkit8.6
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
@@ -1454,7 +1454,7 @@ source [file join [apply {
 					files {cx filelist} { #<<<
 						set resolvedfiles	{}
 						foreach pattern $filelist {
-							foreach file [glob -nocomplain -type file $pattern] {
+							foreach file [glob -nocomplain -type f $pattern] {
 								set fqfn	[fullynormalize $file]
 								if {$fqfn ni $resolvedfiles} {
 									lappend resolvedfiles $fqfn
@@ -1549,7 +1549,7 @@ source [file join [apply {
 					files {cx filelist} { #<<<
 						set resolvedfiles	{}
 						foreach pattern $filelist {
-							foreach file [glob -nocomplain -type file $pattern] {
+							foreach file [glob -nocomplain -type f $pattern] {
 								set fqfn	[fullynormalize $file]
 								if {$fqfn ni $resolvedfiles} {
 									#lappend resolvedfiles $fqfn
@@ -2277,1695 +2277,7 @@ if {[llength $argv] == 0} {
 set actionargs	[lassign $argv action]
 actions $action {*}$actionargs
 
-_init.tcl {F 281 56070} tbuild.tcl {F 55789 55789} pkgIndex.tcl {F 78 56148}app-tbuild {D 76 76}tcl {D 20 20}package provide dsl 0.4
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-
-namespace eval dsl {}
-
-proc dsl::decomment {in} { #<<<
-	set out	""
-
-	foreach line [split $in \n] {
-		if {[string index [string trim $line] 0] eq "#"} continue
-		append out	$line "\n"
-	}
-
-	return $out
-}
-
-#>>>
-# Reserved dsl commands:
-#	if
-#	info
-#	rename
-#	apply
-#	foreach
-#	namespace
-proc dsl::dsl_eval {interp dsl_commands dsl_script args} { #<<<
-	set aliases_old	{}
-	set tmpns		::_dsl_[incr ::dsl::seq]
-	set cmds		{}
-	try {
-		interp eval $interp [format {namespace eval %s {}} [list $tmpns]]
-		foreach {cmdname cmdargs cmdbody} [dsl::decomment $dsl_commands] {
-			if {$cmdname in {if info rename apply foreach namespace}} {
-				error "\"$cmdname\" is a reserved word and cannot be used for a DSL command"
-			}
-			interp eval $interp [format {
-				if {[info commands ::%1$s] ne ""} {
-					rename ::%1$s %2$s::%1$s
-				}
-			} [list $cmdname] [list $tmpns]]
-			lappend cmds	$cmdname
-			#set alias	[interp alias $interp $cmdname]
-			#if {$alias eq ""} {
-			#	dict set aliases_old $cmdname [list {}]
-			#} else {
-			#	dict set aliases_old $cmdname [list [interp target $interp $cmdname] $alias]
-			#}
-
-			interp alias $interp $cmdname {} apply [list $cmdargs $cmdbody [uplevel {namespace current}]] {*}$args
-		}
-
-		if {$interp eq {}} {
-			apply [list {} $dsl_script [uplevel 1 {namespace current}]]
-		} else {
-			interp eval $interp $dsl_script
-		}
-	} finally {
-		#dict for {cmdname oldalias} $aliases_old {
-		#	interp alias $interp $cmdname {*}$oldalias
-		#}
-		interp eval $interp [format {
-			apply {{} {
-				foreach cmd %2$s {
-					rename ::$cmd {}
-					if {[info commands %1$s::$cmd] ne ""} {
-						rename %1$s::$cmd ::$cmd
-					}
-				}
-				namespace delete %1$s
-			}}
-		} [list $tmpns] [list $cmds]]
-	}
-}
-
-#>>>
-
-package provide zip 1.2.1
-# mkzip.tcl -- Copyright (C) 2009 Pat Thoyts <patthoyts@users.sourceforge.net>
-#
-#        Create ZIP archives in Tcl.
-#
-# Create a zipkit using mkzip filename.zkit -zipkit -directory xyz.vfs
-# or a zipfile using mkzip filename.zip -directory dirname -exclude "*~"
-#
-# version 1.2
-
-package require Tcl 8.6
-
-namespace eval zip {}
-
-# zip::timet_to_dos {time_t} <<<
-#
-#        Convert a unix timestamp into a DOS timestamp for ZIP times.
-#
-#   DOS timestamps are 32 bits split into bit regions as follows:
-#                  24                16                 8                 0
-#   +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+
-#   |Y|Y|Y|Y|Y|Y|Y|m| |m|m|m|d|d|d|d|d| |h|h|h|h|h|m|m|m| |m|m|m|s|s|s|s|s|
-#   +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+
-#
-proc zip::timet_to_dos {time_t} {
-	set s [clock format $time_t -format {%Y %m %e %k %M %S}]
-	scan $s {%d %d %d %d %d %d} year month day hour min sec
-	expr {(($year-1980) << 25) | ($month << 21) | ($day << 16) 
-		| ($hour << 11) | ($min << 5) | ($sec >> 1)}
-}
-
-#>>>
-# zip::pop {varname {nth 0}} <<<
-#
-#        Pop an element from a list
-#
-proc zip::pop {varname {nth 0}} {
-	upvar $varname args
-	set r [lindex $args $nth]
-	set args [lreplace $args $nth $nth]
-	return $r
-}
-
-#>>>
-# zip::walk {base {excludes ""} {match *} {path {}}} <<<
-#
-#        Walk a directory tree rooted at 'path'. The excludes list can be
-#        a set of glob expressions to match against files and to avoid.
-#        The match arg is internal.
-#        eg: walk library {CVS/* *~ .#*} to exclude CVS and emacs cruft.
-#
-proc zip::walk {base {excludes ""} {match *} {path {}}} {
-	set result {}
-	set imatch [file join $path $match]
-	set files [glob -nocomplain -tails -types f -directory $base $imatch]
-	foreach file $files {
-		set excluded 0
-		foreach glob $excludes {
-			if {[string match $glob $file]} {
-				set excluded 1
-				break
-			}
-		}
-		if {!$excluded} {lappend result $file}
-	}
-	foreach dir [glob -nocomplain -tails -types d -directory $base $imatch] {
-		set subdir [walk $base $excludes $match $dir]
-		if {[llength $subdir]>0} {
-			set result [concat $result [list $dir] $subdir]
-		}
-	}
-	return $result
-}
-
-#>>>
-# zip::mkzipfile {zipchan base path {comment ""}} <<<
-#
-#        Add a single file to a zip archive. The zipchan channel should
-#        already be open and binary. You may provide a comment for the
-#        file The return value is the central directory record that
-#        will need to be used when finalizing the zip archive.
-#
-# FIX ME: should  handle the current offset for non-seekable channels
-#
-proc zip::mkzipfile {zipchan base path {comment ""}} {
-	set fullpath [file join $base $path]
-	set mtime [timet_to_dos [file mtime $fullpath]]
-	if {[file isdirectory $fullpath]} {
-		append path	/
-	}
-	set utfpath [encoding convertto utf-8 $path]
-	set utfcomment [encoding convertto utf-8 $comment]
-	set flags [expr {(1<<11)}] ;# utf-8 comment and path
-	set method 0               ;# store 0, deflate 8
-	set attr 0                 ;# text or binary (default binary)
-	set version 20             ;# minumum version req'd to extract
-	set extra ""
-	set crc 0
-	set size 0
-	set csize 0
-	set data ""
-	set seekable [expr {[tell $zipchan] != -1}]
-	if {[file isdirectory $fullpath]} {
-		set attrex 0x41ff0010  ;# 0o040777 (drwxrwxrwx)
-	} elseif {[file executable $fullpath]} {
-		set attrex 0x81ff0080  ;# 0o100777 (-rwxrwxrwx)
-	} else {
-		set attrex 0x81b60020  ;# 0o100666 (-rw-rw-rw-)
-		if {[file extension $fullpath] in {".tcl" ".txt" ".c"}} {
-			set attr 1         ;# text
-		}
-	}
-
-	if {[file isfile $fullpath]} {
-		set size [file size $fullpath]
-		if {!$seekable} {set flags [expr {$flags | (1 << 3)}]}
-	}
-
-	set offset [tell $zipchan]
-	set local [binary format a4sssiiiiss PK\03\04 \
-			$version $flags $method $mtime $crc $csize $size \
-			[string length $utfpath] [string length $extra]]
-	append local $utfpath $extra
-	puts -nonewline $zipchan $local
-
-	if {[file isfile $fullpath]} {
-		# If the file is under 2MB then zip in one chunk, otherwize we use
-		# streaming to avoid requiring excess memory. This helps to prevent
-		# storing re-compressed data that may be larger than the source when
-		# handling PNG or JPEG or nested ZIP files.
-		if {$size < 0x00200000} {
-			set fin [open $fullpath rb]
-			set data [read $fin]
-			set crc [zlib crc32 $data]
-			set cdata [zlib deflate $data]
-			if {[string length $cdata] < $size} {
-				set method 8
-				set data $cdata
-			}
-			close $fin
-			set csize [string length $data]
-			puts -nonewline $zipchan $data
-		} else {
-			set method 8
-			set fin [open $fullpath rb]
-			set zlib [zlib stream deflate]
-			while {![eof $fin]} {
-				set data [read $fin 4096]
-				set crc [zlib crc32 $data $crc]
-				$zlib put $data
-				if {[string length [set zdata [$zlib get]]]} {
-					incr csize [string length $zdata]
-					puts -nonewline $zipchan $zdata
-				}
-			}
-			close $fin
-			$zlib finalize
-			set zdata [$zlib get]
-			incr csize [string length $zdata]
-			puts -nonewline $zipchan $zdata
-			$zlib close
-		}
-
-		if {$seekable} {
-			# update the header if the output is seekable
-			set local [binary format a4sssiiii PK\03\04 \
-					$version $flags $method $mtime $crc $csize $size]
-			set current [tell $zipchan]
-			seek $zipchan $offset
-			puts -nonewline $zipchan $local
-			seek $zipchan $current
-		} else {
-			# Write a data descriptor record
-			set ddesc [binary format a4iii PK\7\8 $crc $csize $size]
-			puts -nonewline $zipchan $ddesc
-		}
-	}
-
-	set hdr [binary format a4ssssiiiisssssii PK\01\02 0x0317 \
-			$version $flags $method $mtime $crc $csize $size \
-			[string length $utfpath] [string length $extra]\
-			[string length $utfcomment] 0 $attr $attrex $offset]
-	append hdr $utfpath $extra $utfcomment
-	return $hdr
-}
-
-#>>>
-# zip::mkzip {filename args} <<<
-#
-#        Create a zip archive in 'filename'. If a file already exists it will be
-#        overwritten by a new file. If '-directory' is used, the new zip archive
-#        will be rooted in the provided directory.
-#        -runtime can be used to specify a prefix file. For instance, 
-#        zip myzip -runtime unzipsfx.exe -directory subdir
-#        will create a self-extracting zip archive from the subdir/ folder.
-#        The -comment parameter specifies an optional comment for the archive.
-#
-#        eg: zip my.zip -directory Subdir -runtime unzipsfx.exe *.txt
-# 
-proc zip::mkzip {filename args} {
-	try {
-		set chan	[open $filename wb]
-		zip::mkzipchan $chan {*}$args
-	} finally {
-		if {[info exists chan] && $chan in [chan names]} {
-			close $chan
-		}
-	}
-}
-
-#>>>
-proc zip::mkzipchan {zf args} { #<<<
-	array set opts {
-		-zipkit 0 -runtime "" -comment "" -directory ""
-		-exclude {CVS/* */CVS/* *~ ".#*" "*/.#*"}
-	}
-
-	while {[string match -* [set option [lindex $args 0]]]} {
-		switch -exact -- $option {
-			-zipkit  { set opts(-zipkit) 1 }
-			-comment { set opts(-comment) [encoding convertto utf-8 [pop args 1]] }
-			-runtime { set opts(-runtime) [pop args 1] }
-			-directory {set opts(-directory) [file normalize [pop args 1]] }
-			-exclude {set opts(-exclude) [pop args 1] }
-			-- { pop args ; break }
-			default {
-				break
-			}
-		}
-		pop args
-	}
-
-	if {$opts(-runtime) ne ""} {
-		set rt [open $opts(-runtime) rb]
-		fcopy $rt $zf
-		close $rt
-	} elseif {$opts(-zipkit)} {
-		set zkd "#!/usr/bin/env tclkit\n\# This is a zip-based Tcl Module\n"
-		append zkd "package require vfs::zip\n"
-		append zkd "vfs::zip::Mount \[info script\] \[info script\]\n"
-		append zkd "if {\[file exists \[file join \[info script\] main.tcl\]\]} {\n"
-		append zkd "    source \[file join \[info script\] main.tcl\]\n"
-		append zkd "}\n"
-		append zkd \x1A
-		puts -nonewline $zf $zkd
-	}
-
-	set count 0
-	set cd ""
-
-	if {$opts(-directory) ne ""} {
-		set paths [walk $opts(-directory) $opts(-exclude)]
-	} else {
-		set paths [glob -nocomplain {*}$args]
-	}
-	foreach path $paths {
-		puts $path
-		append cd [mkzipfile $zf $opts(-directory) $path]
-		incr count
-	}
-	set cdoffset [tell $zf]
-	set endrec [binary format a4ssssiis PK\05\06 0 0 \
-			$count $count [string length $cd] $cdoffset\
-			[string length $opts(-comment)]]
-	append endrec $opts(-comment)
-	puts -nonewline $zf $cd
-	puts -nonewline $zf $endrec
-
-	return
-}
-
-#>>>
-
-# Modifications below Copyright (c) 2010 Cyan Ogilvie, licensed BSD
-proc zip::mkzipdata {args} { #<<<
-	#package require Memchan
-	#set chan	[memchan]
-	set chan	[file tempfile]
-	try {
-		chan configure $chan -translation binary -encoding binary
-		zip::mkzipchan $chan {*}$args
-		chan seek $chan 0
-		chan read $chan
-	} finally {
-		if {[info exists chan] && $chan in [chan names]} {
-			chan close $chan
-		}
-	}
-}
-
-#>>>
-
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-package provide deb 0.3
-package require cflib 1.5.0
-
-package require cflib 1.6.0
-package require sugar
-
-namespace eval deb {
-	variable debug	0
-	proc make_deb {settings files} { #<<<
-		variable templates
-		variable debug
-
-		set installfiles_script {#!/usr/bin/env cfkit8.6
-
-			proc writefile {fn data} {
-				set dir	[file dirname [file normalize [file join [pwd] $fn]]]
-				if {![file exists $dir]} {
-					file mkdir $dir
-				}
-				set h	[open $fn w]
-				try {
-					chan configure $h -translation binary -encoding binary
-					chan puts -nonewline $h $data
-				} finally {
-					chan close $h
-				}
-			}
-			lassign $::argv base
-			dict for {fn info} %FILES% {
-				set outfn	[file join $base [string trimleft $fn /]]
-				set data	[dict get $info data]
-				set perms	[dict get $info perms]
-				writefile $outfn [binary decode base64 $data]
-				file attributes $outfn -permissions $perms
-			}
-		}
-
-		set here	[file normalize [pwd]]
-		set now		[clock seconds]
-		cflib::in_tmp_dir {
-			set base	[pwd]
-			file mkdir build
-			cd build
-
-			set replacements	[dict create]
-			dict set replacements %DATE% 			[clock format $now -format "%a, %d %b %Y %H:%M:%S %z"]
-			dict set replacements %AUTHOR_NAME%		"Cyan Ogilvie"
-			dict set replacements %AUTHOR_EMAIL%	"cyan.ogilvie@gmail.com"
-			dict set replacements %PACKAGE_NAME%	""
-			dict set replacements %VERSION%			"0.1"
-			dict set replacements %RELEASE%			"1"
-			dict set replacements %SECTION%			"utils"
-			dict set replacements %SUMMARY%			"No summary"
-			dict set replacements %DESCRIPTION%		"No description"
-			dict set replacements %DEPENDS%			{}
-
-			set replacements	[dict merge $replacements $settings]
-
-			if {![dict exists $replacements %LICENSE%]} {
-				dict set replacements %LICENSE%			"Copyright (C) [clock format [clock seconds] -format %Y] [dict get $replacements %AUTHOR_NAME%] <[dict get $replacements %AUTHOR_EMAIL%]>\nAll rights reserved"
-			}
-			set depends [join [dict get $replacements %DEPENDS%] ", "]
-			if {$depends ne ""} {
-				set depends	", $depends"
-			}
-			dict set replacements %DEPENDS% $depends
-
-			dict set replacements %SUMMARY%	[string trim [dict get $replacements %SUMMARY%]]
-
-			set description	""
-			foreach line [split [string trim [dict get $replacements %DESCRIPTION%]] \n] {
-				append description	" " [string trim $line] \n
-			}
-			dict set replacements %DESCRIPTION% $description
-
-			set outfiles	[dict create]
-			dict for {fn data} $templates {
-				dict set outfiles	$fn [string map $replacements $data]
-			}
-
-			dict for {fn info} $outfiles {
-				set data	[dict get $info data]
-				set perms	[dict get $info perms]
-				set dir	[file dirname $fn]
-				if {![file exists $dir]} {
-					file mkdir $dir
-				}
-				cflib::writefile $fn $data
-				file attributes $fn -permissions $perms
-			}
-
-			cflib::writefile Makefile {DESTDIR=
-
-all:
-
-clean:
-
-install: all
-	./installfiles.tcl $(DESTDIR)/
-}
-			dict for {fn info} $files {
-				dict set files $fn data [binary encode base64 [dict get $info data]]
-			}
-
-			if {[dict exists $replacements %POSTINST%]} {
-				cflib::writefile [file join debian postinst] \
-						[dict get $replacements %POSTINST%]
-				file attributes [file join debian postinst] -permissions 0755
-			}
-			if {[dict exists $replacements %PRERM%]} {
-				cflib::writefile [file join debian prerm] \
-						[dict get $replacements %PRERM%]
-				file attributes [file join debian prerm] -permissions 0755
-			}
-			set installfiles_out	{}
-			foreach cmd [sugar::scriptToList $installfiles_script] {
-				set outcmd	{}
-				foreach word $cmd {
-					lassign $word type details
-					if {$type eq "TOK" && $details eq "%FILES%"} {
-						set word	[list TOK "\[[list dict create {*}$files]\]"]
-					}
-					lappend outcmd	$word
-				}
-				lappend installfiles_out	$outcmd
-			}
-			cflib::writefile installfiles.tcl [sugar::listToScript $installfiles_out]
-			file attributes installfiles.tcl -permissions 0755
-
-			try {
-				exec -ignorestderr -- dpkg-buildpackage -b -uc
-			} on error {errmsg options} {
-				if {$::deb::debug} {
-					exec $::env(SHELL) <@ stdin >@ stdout 2>@ stderr
-				}
-			}
-			cd $base
-			set built	[lindex [glob -nocomplain -type f *.deb] 0]
-			if {$built eq ""} {
-				error "No deb built"
-			}
-			set deb_data	[cflib::readfile $built binary]
-		}
-		list [file tail $built] $deb_data
-	}
-
-	#>>>
-}
-namespace eval deb {	variable templates [dict create]
-	dict set templates debian/dirs perms 00644
-	dict set templates debian/dirs data {usr/bin
-}
-	dict set templates debian/control perms 00644
-	dict set templates debian/control data {Source: %PACKAGE_NAME%
-Section: %SECTION%
-Priority: extra
-Maintainer: %AUTHOR_NAME% <%AUTHOR_EMAIL%>
-Build-Depends: debhelper (>= 7)
-Standards-Version: 3.8.1
-
-Package: %PACKAGE_NAME%
-Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}%DEPENDS%
-Description: %SUMMARY%
-%DESCRIPTION%
-}
-	dict set templates debian/rules perms 00755
-	dict set templates debian/rules data {#!/usr/bin/make -f
-# -*- makefile -*-
-# Sample debian/rules that uses debhelper.
-# This file was originally written by Joey Hess and Craig Small.
-# As a special exception, when this file is copied by dh-make into a
-# dh-make output file, you may use that output file without restriction.
-# This special exception was added by Craig Small in version 0.37 of dh-make.
-
-# Uncomment this to turn on verbose mode.
-#export DH_VERBOSE=1
-
-
-
-
-
-configure: configure-stamp
-configure-stamp:
-	dh_testdir
-	# Add here commands to configure the package.
-
-	touch configure-stamp
-
-
-build: build-stamp
-
-build-stamp: configure-stamp  
-	dh_testdir
-
-	# Add here commands to compile the package.
-	$(MAKE)
-	#docbook-to-man debian/%PACKAGE_NAME%.sgml > cfkit.1
-
-	touch $@
-
-clean: 
-	dh_testdir
-	dh_testroot
-	rm -f build-stamp configure-stamp
-
-	# Add here commands to clean up after the build process.
-	$(MAKE) clean
-
-	dh_clean
-
-install: build
-	dh_testdir
-	dh_testroot
-	dh_prep   --exclude ./build/win32/tk/Makefile.orig --exclude ./build/win32/tcl/Makefile.orig
-	dh_installdirs
-
-	# Add here commands to install the package into debian/%PACKAGE_NAME%.
-	$(MAKE) DESTDIR=$(CURDIR)/debian/%PACKAGE_NAME% install
-
-
-# Build architecture-independent files here.
-binary-indep: install
-# We have nothing to do by default.
-
-# Build architecture-dependent files here.
-binary-arch: install
-	dh_testdir
-	dh_testroot
-	dh_installchangelogs 
-	dh_installdocs
-	dh_installexamples
-#	dh_install
-#	dh_installmenu
-#	dh_installdebconf
-#	dh_installlogrotate
-#	dh_installemacsen
-#	dh_installpam
-#	dh_installmime
-#	dh_python
-#	dh_installinit
-#	dh_installcron
-#	dh_installinfo
-	dh_installman
-	dh_link
-#	dh_strip
-	dh_compress
-	dh_fixperms
-#	dh_perl
-#	dh_makeshlibs
-	dh_installdeb
-	dh_shlibdeps
-	dh_gencontrol
-	dh_md5sums
-	dh_builddeb
-
-binary: binary-indep binary-arch
-.PHONY: build clean binary-indep binary-arch binary install configure
-}
-	dict set templates debian/changelog perms 00644
-	dict set templates debian/changelog data {%PACKAGE_NAME% (%VERSION%-%RELEASE%) unstable; urgency=low
-
-  * tbuild generated package - no changelog history available, sorry.
-
- -- %AUTHOR_NAME% <%AUTHOR_EMAIL%>  %DATE%
-}
-	dict set templates debian/compat perms 00644
-	dict set templates debian/compat data {7
-}
-	dict set templates debian/copyright perms 00644
-	dict set templates debian/copyright data {%LICENSE%
-}
-}
-package require cflib
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-
-cflib::pclass create sop::signal {
-	superclass cflib::handlers cflib::baselog
-
-	property name		""	_name_changed
-	property debugmode	0
-	property output_handler_warntime	3000
-
-	variable {*}{
-		outputs
-		cleanups
-		o_state
-		afterids
-		changewait
-		seq
-	}
-
-	method _name_changed {} { #<<<
-		set baselog_instancename	$name
-	}
-
-	#>>>
-
-	constructor {accessvar args} { #<<<
-		my variable outputs o_state
-		set name		""
-		set outputs		{}
-		set o_state		0
-		set seq			0
-
-		set cleanups	[dict create]
-		set afterids	[dict create]
-		array set changewait	{}
-
-		my configure {*}$args
-
-		upvar $accessvar scopevar
-		set scopevar	[self]
-		trace variable scopevar u [namespace code {my _scopevar_unset}]
-	}
-
-	#>>>
-	destructor { #<<<
-		my _debug debug "tlc::Signal::destructor: [self] $name dieing"
-		#trace vdelete scopevar u [namespace code {my _scopevar_unset}]
-		if {$debugmode} {
-			dict for {tag afterid} $afterids {
-				after cancel $afterid
-				dict unset afterids $tag
-			}
-		}
-		foreach output $outputs {
-			my _debug debug "tlc::Signal::destructor: ------ twitch: ($output)"
-			my detach_output $output
-		}
-
-		foreach {key info} [array get changewait] {
-			my _debug debug "notifying waiting changewait($key) of our death"
-			set rest	[lassign $info type state]
-			if {$state ne "waiting"} continue
-			switch -- $type {
-				coro {
-					set coro	[lindex $rest 0]
-					set changewait($key)	[list $type "source_died"]
-					$coro "source_died"
-				}
-
-				vwait {
-					set changewait($key)	[list $type "source_died"]
-				}
-
-				default {
-					my _debug error "Invalid changewait type ($type) when trying to signal source death"
-				}
-			}
-		}
-		if {[self next] ne {}} {next}
-		my _debug debug "tlc::Signal::destructor: [self] truely dead"
-	}
-
-	#>>>
-
-	method state {args} { #<<<
-		switch -exact -- [llength $args] {
-			0		{set o_state}
-			default	{tailcall my set_state {*}$args}
-		}
-	}
-
-	#>>>
-	method set_state {newstate} { #<<<
-		my variable o_state
-		if {![string is boolean -strict $newstate]} {
-			throw [list not_a_boolean $newstate] \
-					"newstate must be a valid boolean"
-		}
-		if {$newstate} {
-			set normstate	1
-		} else {
-			set normstate	0
-		}
-		my _on_set_state $normstate
-		if {$o_state == $normstate} return
-		set o_state	$normstate
-		my _update_outputs
-	}
-
-	#>>>
-	method toggle_state {} { #<<<
-		my variable o_state
-		my set_state [expr {!$o_state}]
-	}
-
-	#>>>
-
-	method attach_output {handler {cleanup {}}} { #<<<
-		my variable outputs
-		if {$handler in $outputs} {
-			return 0
-		}
-
-		lappend outputs $handler
-		
-		if {$cleanup ne {}} {
-			dict set cleanups $handler	$cleanup
-		}
-		my _update_output $handler
-		
-		return 1
-	}
-
-	#>>>
-	method detach_output {handler} { #<<<
-		my _debug debug "tlc::Signal::detach_output: ($handler)"
-		if {$handler in $outputs} {
-			set idx			[lsearch $outputs $handler]
-			set outputs		[lreplace $outputs $idx $idx]
-
-			if {[dict exists $cleanups $handler]} {
-				my _debug debug "tlc::Signal::detach_output: cleaning up ($handler)"
-				my _debug debug "tlc::Signal::detach_output: foo"
-				coroutine coro_handler_cleanup_[incr ::coro_seq] \
-					{*}[dict get $cleanups $handler]
-				my _debug debug "tlc::Signal::detach_output: bar"
-				dict unset cleanups $handler
-			}
-			
-			return 1
-		} else {
-			my _debug debug "tlc::Signal:detach_output: output not found!!\n($handler)\n[join $outputs \n]]\n============================="
-			return 0
-		}
-	}
-
-	#>>>
-
-	method name {} { #<<<
-		return $name
-	}
-
-	#>>>
-	method explain_txt {{depth 0}} { #<<<
-		return "[string repeat {  } $depth][self] \"[[self] name]\": [[self] state]\n"
-	}
-
-	#>>>
-
-	method waitfor {sense {timeout 0}} { #<<<
-		if {$sense} {
-			if {[my state]} return
-			set normsense	1
-		} else {
-			if {![my state]} return
-			set normsense	0
-		}
-
-		set signame	[my name]
-		set myseq	[incr seq]
-
-		if {$timeout != 0} {
-			set afterid \
-					[after $timeout [namespace code [list my _changewait_timeout $myseq]]]
-			dict set afterids waitfor_$myseq	$afterid
-		}
-
-		set resolved	0
-		while {!($resolved)} {
-			if {[info coroutine] ne ""} {
-				set changewait($myseq)	[list coro "waiting" [info coroutine]]
-				set res	[yield]
-			} else {
-				# Blegh
-				my _debug warning "Warning: using vwait implementation of waitfor.  Calling from a coroutine context is strongly advised"
-				set changewait($myseq)	[list vwait "waiting"]
-				my _debug debug "tlc::Signal::waitfor: Waiting for [namespace which -variable changewait]($myseq)"
-				vwait [namespace which -variable changewait]($myseq)
-				set res	[lindex $changewait($myseq) 1]
-			}
-			if {[string is boolean $res] && [my state] != $normsense} {
-				log warning "Woken up by transient spike while waiting for state $sense, waiting for more permanent change ($name)"
-				?? {
-					if {[info object class [self]] eq "::sop::gate"} {
-						log warning [my explain_txt]
-					}
-				}
-				set resolved	0
-			} else {
-				set resolved	1
-			}
-		}
-
-		if {[info exists afterid]} {
-			after cancel $afterid
-			unset afterid
-		}
-
-		if {$res ne "source_died"} {
-			# in the case where we have died, these data members have
-			# disappeared, and to try to access them (like unsetting them)
-			# causes a segfault
-
-			dict unset afterids waitfor_$myseq
-			array unset changewait $myseq
-		}
-
-		switch -- $res {
-			1 -
-			0 {
-				return
-			}
-
-			"timeout" {
-				throw [list timeout $signame] \
-						"Timeout waiting for signal \"$signame\""
-			}
-
-			"source_died" {
-				throw [list source_died $signame] \
-						"Source died while waiting for signal \"$signame\""
-			}
-
-			default {
-				error "Unexpected result waiting for signal \"$signame\": ($res)"
-			}
-		}
-	}
-
-	#>>>
-
-	method _update_output {handler} { #<<<
-		my variable o_state
-		#puts stderr "Signal::_update_output($o_state): $name ([self]) update output ($handler)"
-		if {$debugmode} {
-			set pending_afterid	[after $output_handler_warntime \
-					[namespace code [list my _throw_hissy $handler]]]
-			dict set afterids update_output_$handler	$pending_afterid
-		}
-		try {
-			coroutine coro_update_output_[incr ::coro_seq] \
-					{*}$handler $o_state
-		} on error {errmsg options} {
-			my log error "\n\"$name\" error updating output ($o_state) handler: ($handler) $name ([self]): $errmsg\n[dict get $options -errorinfo]"
-		}
-		if {$debugmode} {
-			after cancel $pending_afterid
-			dict unset afterids	update_output_$handler
-		}
-		#puts stderr "Signal::_update_output: $name ([self]) done"
-	}
-
-	#>>>
-	method _update_outputs {} { #<<<
-		my variable outputs
-		foreach output $outputs {
-			my _update_output $output
-		}
-		my _debug debug "tlc::Signal::_update_outputs: Flagging changewaits: ([array names changewait])"
-		foreach {key info} [array get changewait] {
-			my _debug debug "tlc::Signal::_update_outputs: flagging state change for waiting vwait: changewait($key) to ($o_state)"
-			set rest	[lassign $info type state]
-			if {$state ne "waiting"} continue
-			switch -- $type {
-				coro {
-					set coro	[lindex $rest 0]
-					set changewait($key)	[list "coro" $o_state]
-					after idle [list $coro $o_state]
-				}
-
-				vwait {
-					set changewait($key)	[list "vwait" $o_state]
-				}
-
-				default {
-					my _debug error "Invalid changewait type: ($type)"
-				}
-			}
-		}
-	}
-
-	#>>>
-	method _debug {level msg} { #<<<
-		my invoke_handlers _debug $level $msg
-	}
-
-	#>>>
-	method _on_set_state {pending} { #<<<
-	}
-
-	#>>>
-	method _throw_hissy {handler} { #<<<
-		log warning "name: ($name) obj: ([self]) taking way too long to update output for handler: ($handler)"
-	}
-
-	#>>>
-	method _scopevar_unset {args} { #<<<
-		#puts stderr "Signal::_scopevar_unset: $name ([self]) scopevar unset"
-		if {$debugmode} {
-			my _debug debug "tlc::Signal::_scopevar_unset"
-		}
-		my destroy
-	}
-
-	#>>>
-	method _changewait_timeout {myseq} { #<<<
-		if {![info exists changewait($myseq)]} {
-			my _debug error "cannot timeout: changewait($myseq) vanished!"
-			return
-		}
-		set rest	[lassign $changewait($myseq) type state]
-		if {$state ne "waiting"} return
-		switch -- $type {
-			coro {
-				set coro	[lindex $rest 0]
-				set changewait($myseq)	[list "coro" "timeout"]
-				after idle [list $coro "timeout"]
-			}
-
-			vwait {
-				set changewait($myseq)	[list "vwait" "timeout"]
-			}
-
-			default {
-				my _debug error "Invalid changewait type: ($type)"
-			}
-		}
-	}
-
-	#>>>
-}
-
-
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-
-cflib::pclass create sop::gate {
-	superclass sop::signal
-
-	pclass_config {
-		constructor_auto_next	0
-	}
-
-	property mode		"or"	_mode_changed
-	property default	0		_default_changed
-
-	method _mode_changed {} { #<<<
-		set valid_modes	{and nand nor or}
-		if {$mode ni $valid_modes} {
-			throw {PROPERTY INVALID} "-mode must be one of ([join $valid_modes {, }])"
-		}
-		my _calc_o_state
-	}
-
-	#>>>
-	method _default_changed {} { #<<<
-		my _calc_o_state
-	}
-
-	#>>>
-
-	variable {*}{
-		inputs
-		sense
-		isvar
-		var_inputs
-	}
-
-	constructor {accessvar args} { #<<<
-		upvar $accessvar scopevar
-		next $accessvar
-
-		set inputs		[dict create]
-		set sense		[dict create]
-		set isvar		[dict create]
-		set var_inputs	{}
-
-		my configure {*}$args
-	}
-
-	#>>>
-	destructor { #<<<
-		foreach var_input $var_inputs {
-			my detach_var_input $var_input
-		}
-		foreach input [dict keys $inputs] {
-			try {
-				if {[my _isa_signal $input]} {
-					$input detach_output [my code _input_update $input]
-				}
-			} on error {errmsg options} {
-				puts stderr "Error detatching input ($input) during game destructor: $errmsg\n[dict get $options -errorinfo]"
-			}
-		}
-	}
-
-	#>>>
-	
-	method attach_input {gate_obj {a_sense normal}} { #<<<
-		if {![my _isa_signal $gate_obj]} {
-			error "$gate_obj isn't a sop::signal"
-		}
-
-		#$gate_obj register_handler debug [my code _debug]
-		dict set sense $gate_obj	[expr {$a_sense ne "normal"}]
-
-		return [$gate_obj attach_output [my code _input_update $gate_obj] \
-				[my code _cleanup $gate_obj]]
-	}
-
-	#>>>
-	method detach_input {gate_obj} { #<<<
-		if {![my _isa_signal $gate_obj]} {
-			error "$gate_obj isn't a sop::signal"
-		}
-
-		my _debug debug "tlc::Gate::detach_input ([self]): ($gate_obj)"
-
-		set ok	[catch {unset inputs($gate_obj)} msg]
-		dict unset inputs $gate_obj
-		
-		$gate_obj detach_output [my code _input_update $gate_obj]
-
-		my _calc_o_state
-	}
-
-	#>>>
-	method detach_all_inputs {} { #<<<
-		foreach vinput $var_inputs {
-			my detach_var_input $vinput
-		}
-		foreach gate_obj [dict keys $inputs] {
-			detach_input $gate_obj
-		}
-	}
-
-	#>>>
-	method attach_var_input {varname {a_sense normal}} { #<<<
-		if {$varname ni $var_inputs} {
-			lappend var_inputs	$varname
-		}
-		dict set isvar [self]::$varname	$varname
-		dict set sense [self]::$varname	[expr {$a_sense eq "inverted"}]
-		trace add variable $varname {write unset} \
-				[my code _var_input_update $varname]
-
-		my _var_input_update $varname $varname "" write
-	}
-
-	#>>>
-	method detach_var_input {varname} { #<<<
-		set idx			[lsearch $var_inputs $varname]
-		set var_inputs	[lreplace $var_inputs $idx $idx]
-		trace remove variable $varname {write unset} \
-				[my code _var_input_update $varname]
-
-		dict unset inputs [self]::$varname
-		dict unset sense [self]::$varname
-		dict unset isvar [self]::$varname
-
-		my _calc_o_state
-	}
-
-	#>>>
-
-	method explain_state {} { #<<<
-		return $inputs
-	}
-
-	#>>>
-	method explain_txt {{depth 0}} { #<<<
-		set txt	""
-		set firstdepth	[expr {($depth > 0) ? $depth-1 : 0}]
-		append txt "[self] \"[[self] name]\": [[self] state]\[$default\] [string toupper $mode] (\n"
-		foreach key [dict keys $inputs] {
-	#		append txt "[string repeat {  } $firstdepth]"
-			append txt "[string repeat {  } $depth]"
-			append txt [dict get $inputs $key]
-			append txt [expr {[dict get $sense $key] ? "i" : " "}]
-			if {[dict exists $isvar $key]} {
-				append txt "[self] var_input: [dict get $isvar $key] ([dict get $inputs $key])\n"
-			} else {
-				append txt [$key explain_txt [expr {$depth + 1}]]
-			}
-		}
-		append txt "[string repeat {  } $depth])\n"
-
-		return $txt
-	}
-
-	#>>>
-
-	method _calc_o_state {} { #<<<
-		if {[dict size $inputs] == 0} {
-			set new_o_state		$default
-		} else {
-			switch [string tolower $mode] {
-				"and" - "nor"	{set assume	1}
-				"nand" - "or"	{set assume	0}
-			}
-
-			dict for {input state} $inputs {
-				switch [string tolower $mode] {
-					"and" - "nand"	{
-						if {!($state)} {
-							set assume	[expr {!($assume)}]
-							break
-						}
-					}
-
-					"or" - "nor"	{
-						if {$state} {
-							set assume	[expr {!($assume)}]
-							break
-						}
-					}
-				}
-			}
-
-			set new_o_state		$assume
-		}
-
-		my set_state $new_o_state
-	}
-
-	#>>>
-	method _input_update {gate_obj state} { #<<<
-		if {[dict get $sense $gate_obj]} {
-			set state	[expr {!$state}]
-		}
-		my _debug debug "tlc::Gate::input_update ([self]) ($name): ($gate_obj) ($state)"
-		dict set inputs $gate_obj	$state
-
-		my _calc_o_state
-	}
-
-	#>>>
-	method _var_input_update {varname n1 n2 op} { #<<<
-		upvar $varname value
-		switch $op {
-			write {
-				if {![info exists value]} {
-					error "var doesn't exist!  ($varname)"
-				}
-				set state	[expr {
-					[string is boolean $value] && $value
-				}]
-				if {[dict get $sense [self]::$varname]} {
-					set state	[expr {!($state)}]
-				}
-				dict set inputs [self]::$varname $state
-
-				my _calc_o_state
-			}
-
-			unset {
-				my detach_var_input $varname
-			}
-		}
-	}
-
-	#>>>
-	method _cleanup {gate_obj} { #<<<
-		my detach_input $gate_obj
-	}
-
-	#>>>
-	method _isa_signal {obj} { #<<<
-		expr {
-			[info object isa typeof $obj sop::signal] ||
-			([itcl::is object $obj] && [$obj isa tlc::Signal])
-		}
-	}
-
-	#>>>
-}
-
-
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-
-cflib::pclass create sop::signalsource {
-	constructor {} { #<<<
-		if {[self next] ne {}} {next}
-		array set signals	{}
-	}
-
-	#>>>
-	destructor { #<<<
-		array unset signals
-		if {[self next] ne {}} {next}
-	}
-
-	#>>>
-
-	protected_property signals
-
-	method signal_ref {signal} { #<<<
-		if {![info exists signals($signal)]} {
-			error "Invalid signal ($signal)" "" [list invalid_signal $signal]
-		}
-		return $signals($signal)
-	}
-
-	#>>>
-	method signal_state {signal} { #<<<
-		if {![info exists signals($signal)]} {
-			error "Invalid signal ($signal)" "" [list invalid_signal $signal]
-		}
-		return [$signals($signal) state]
-	}
-
-	#>>>
-	method waitfor {signal {timeout 0}} { #<<<
-		if {![info exists signals($signal)]} {
-			throw [list invalid_signal $signal] "Invalid signal ($signal)"
-		}
-		$signals($signal) waitfor true $timeout
-	}
-
-	#>>>
-	method signals_available {} { #<<<
-		set build	{}
-		foreach signame [lsort -dictionary [array names signals]] {
-			lappend build	$signame $signals($signame)
-		}
-		return $build
-	}
-
-	#>>>
-}
-
-
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-
-# Signals:
-#	onchange()					- Fired when a variable changes value
-#	onchange_info(n1, n2, op)	- Fired when a variable changes value
-
-cflib::pclass create sop::varwatch {
-	superclass sop::signal
-
-	pclass_config {
-		constructor_auto_next	0
-	}
-
-	variable {*}{
-		watchvars
-		lock
-		afterids
-		dominos
-	}
-
-	constructor {accessvar args} { #<<<
-		set watchvars		{}
-		set lock			0
-		set afterids		{}
-		array set dominos	{}
-
-		sop::domino new dominos(onchange) -name "[self] onchange"
-
-		if {"oo::Helpers::cflib" ni [namespace path]} {
-			namespace path [concat [namespace path] {
-				::oo::Helpers::cflib
-			}]
-		}
-
-		$dominos(onchange) attach_output [code invoke_handlers onchange]
-
-		upvar $accessvar scopevar
-		next $accessvar
-
-		my configure {*}$args
-	}
-
-	#>>>
-	destructor { #<<<
-		if {[info exists dominos(onchange)] && [info object isa object $dominos(onchange)]} {
-			$dominos(onchange) destroy
-			array unset dominos onchange
-		}
-		foreach var $watchvars {
-			my detach_dirtyvar $var
-		}
-		foreach afterid $afterids {
-			after cancel $afterid
-		}
-		set afterids	{}
-		if {[self next] ne ""} next
-	}
-
-	#>>>
-
-	method attach_dirtyvar {varname} { #<<<
-		if {$varname ni $watchvars} {
-			lappend watchvars	$varname
-		}
-		trace add variable $varname {write unset} [code _var_update]
-	}
-
-	#>>>
-	method detach_dirtyvar {varname} { #<<<
-		set idx			[lsearch $watchvars $varname]
-		set watchvars	[lreplace $watchvars $idx $idx]
-		trace remove variable $varname {write unset} [code _var_update]
-	}
-
-	#>>>
-	method arm {} {incr lock -1}
-	method disarm {} {incr lock}
-	method is_armed {} {expr {$lock > 0}}
-	method force_if_pending {} { #<<<
-		set pending		$afterids
-		set afterids	{}
-		foreach afterid $pending {
-			set script	[lindex [after info $afterid] 0]
-			after cancel $afterid
-			if {$script ne ""} {
-				try {
-					uplevel #0 $script
-				} on error {errmsg options} {
-					puts [dict get $options -errorinfo]
-				}
-			}
-		}
-		$dominos(onchange) force_if_pending
-	}
-
-	#>>>
-	method _on_set_state {pending} { #<<<
-		set pending		$afterids
-		set afterids	{}
-		foreach afterid $pending {
-			after cancel $afterid
-		}
-	}
-
-	#>>>
-	method _var_update {n1 n2 op} { #<<<
-		if {$lock > 0} return
-		my set_state 1
-		if {[my handlers_available onchange_info]} {
-			lappend afterids	[after idle [code fire_onchange $n1 $n2 $op]]
-		}
-		$dominos(onchange) tip
-	}
-
-	#>>>
-	method _fire_onchange {n1 n2 op} { #<<<
-		my invoke_handlers onchange_info $n1 $n2 $op
-	}
-
-	#>>>
-}
-
-
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-
-cflib::pclass create sop::statetoggle {
-	superclass sop::gate
-	mixin cflib::baselog
-
-	pclass_config {
-		constructor_auto_next	0
-	}
-
-	property explain	0
-
-	variable {*}{
-		name
-		target
-		toggles
-		deleting
-		lasterror
-	}
-
-	constructor {accessvar args} { #<<<
-		set deleting	0
-
-		upvar $accessvar scopevar
-		next $accessvar
-
-		if {"oo::Helpers::cflib" ni [namespace path]} {
-			namespace path [concat [namespace path] {
-				::oo::Helpers::cflib
-			}]
-		}
-
-		set configureargs	{}
-		# Process in-line configure arguments
-		while {[string index [lindex $args 0] 0] eq "-"} {
-			set args	[lassign $args opt val]
-			lappend configureargs	$opt $val
-		}
-		set toggles	[lassign $args target]
-		if {![winfo exists $target]} {
-			error "Widget: ($target) is not valid"
-		}
-
-		#bind $target <Destroy> +[format {
-		#	if {[info object isa object %1$s]} {
-		#		try {
-		#			%2$s
-		#		} on error {errmsg options} {
-		#			puts stderr "Error destroying (%1$s): [dict get $options -errorinfo]"
-		#		}
-		#	}
-		#} [list [self]] [code destroy]]
-		bind $target <Destroy> +[list apply {
-			{obj} {
-				if {[info object isa object $obj]} {$obj destroy}
-			}
-		} [self]]
-
-		my configure -mode "and" {*}$configureargs
-		my configure -name "tlc::StateToggle internal [self] \"$name\""
-
-		my attach_output [code _stategate_update]
-	}
-
-	#>>>
-	destructor { #<<<
-		set deleting		1
-		my log debug "tlc::StateToggle ($target) ([self]) going away"
-		my detach_output [code _stategate_update]
-		if {[winfo exists $target]} {
-			#catch {
-			#	trace remove command $target delete [list [self] destroy]
-			#}
-		}
-	}
-
-	#>>>
-
-	method attach_signal {signal {a_sense normal}} {my attach_input $signal $a_sense}
-	method detach_signal {signal} {my detach_input $signal}
-	method force_update {} {my _stategate_update [my state]}
-	method target {} {set target}
-	method deleting {} {set deleting}
-	method explain {} { #<<<
-		set build	""
-		if {[info exists lasterror]} {
-			append build	"Last error configuring target: $lasterror" \n
-		}
-		append build [explain_txt]
-		return $build
-	}
-
-	#>>>
-
-	method _stategate_update {{newstate ""}} { #<<<
-		if {[info exists lasterror]} {unset lasterror}
-		if {$newstate ne ""} {
-			set stategate_state	$newstate
-		}
-		if {$explain} {
-			my log debug [my explain_txt]
-		}
-		set switchlist	{}
-		dict for {key values} $toggles {
-			lappend switchlist	$key [lindex $values $stategate_state]
-		}
-		if {$debugmode} {
-			my log debug "[self] Updating $target: ([state]) ($switchlist)"
-		}
-		try {
-			$target configure {*}$switchlist
-		} on error {errmsg options} {
-			set lasterror	$errmsg
-			my log error "\nError configuring $target: $errmsg\n[dict get $options -errorinfo]"
-		}
-	}
-
-	#>>>
-}
-
-
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-
-cflib::pclass create sop::domino {
-	superclass cflib::baselog
-
-	property name	""		_name_changed
-	property delay	"idle"
-
-	protected_property after_id	""
-	protected_property outputs	{}
-	protected_property inputs	[dict create]
-	protected_property lock		0
-
-	method _name_changed {} { #<<<
-		set baselog_instancename	$name
-	}
-
-	#>>>
-
-	constructor {accessvar args} { #<<<
-		my configure {*}$args
-
-		if {$name eq ""} {
-			my configure -name $accessvar
-		}
-
-		upvar $accessvar scopevar
-		set scopevar [self]
-		trace variable scopevar u [my code _scopevar_unset]
-	}
-
-	#>>>
-	destructor { #<<<
-		after cancel $after_id
-		foreach dom_obj [dict keys $inputs] {
-			my detach_input $dom_obj
-		}
-	}
-
-	#>>>
-
-	method tip {args} { #<<<
-		if {$lock > 0} return
-
-		if {$after_id ne ""} return
-		my _debug debug "tlc::Domino::tip: ([self]) ($name)"
-		set after_id	[after $delay [my code _tip_outputs]]
-	}
-
-	#>>>
-	method tip_now {args} { #<<<
-		my _tip_outputs
-	}
-
-	#>>>
-	method attach_output {handler} { #<<<
-		if {$handler ni $outputs} {
-			lappend outputs $handler
-			return 1
-		} else {
-			return 0
-		}
-	}
-
-	#>>>
-	method detach_output {handler} { #<<<
-		set idx		[lsearch $outputs $handler]
-		set outputs	[lreplace $outputs $idx $idx]
-	}
-
-	#>>>
-	method attach_input {dom_obj} { #<<<
-		if {![info object isa typeof $dom_obj sop::domino]} {
-			error "$dom_obj isn't a sop::domino"
-		}
-
-		dict set inputs $dom_obj	1
-
-		return [$dom_obj attach_output [my code tip]]
-	}
-
-	#>>>
-	method detach_input {dom_obj} { #<<<
-		if {![info object isa typeof $dom_obj sop::domino]} {
-			error "$dom_obj isn't a Domino"
-		}
-
-		dict unset inputs $dom_obj
-
-		return [$dom_obj detach_output [my code tip]]
-	}
-
-	#>>>
-	method pending {} { #<<<
-		expr {$after_id ne ""}
-	}
-
-	#>>>
-	method force_if_pending {} { #<<<
-		if {$after_id ne ""} {my tip_now}
-	}
-
-	#>>>
-	method cancel_if_pending {} { #<<<
-		if {$after_id ne ""} {
-			after cancel $after_id
-			set after_id	""
-		}
-	}
-
-	#>>>
-	method lock {} { #<<<
-		incr lock
-	}
-
-	#>>>
-	method unlock {} { #<<<
-		incr lock -1
-		if {$lock < 0} {
-			puts stderr "[self] lock went below zero!: $lock"
-		}
-	}
-
-	#>>>
-
-	method _debug {level msg} { #<<<
-#		invoke_handlers debug $level $msg
-	}
-
-	#>>>
-	method _tip_outputs {} { #<<<
-		after cancel $after_id
-		set after_id	""
-		foreach output $outputs {
-			try {
-				coroutine coro_domino_output_[incr ::coro_seq] {*}$output
-			} on error {errmsg options} {
-				my log error "\nerror updating output ($output):\n\t$errmsg\n[dict get $options -errorinfo]"
-			}
-		}
-	}
-
-	#>>>
-	method _scopevar_unset {args} { #<<<
-		my log debug
-		delete object [self]
-	}
-
-	#>>>
-}
-
-
-package provide cflib 1.13.0
+_init.tcl {F 281 56142} tbuild.tcl {F 55783 55783} pkgIndex.tcl {F 78 55861}app-tbuild {D 76 76}tcl {D 20 20}package provide cflib 1.13.0
 
 		namespace eval cflib {}
 	
@@ -6037,6 +4349,1625 @@ oo::class create cflib::refcounted {
 }
 
 
+package provide deb 0.3
+package require cflib 1.5.0
+
+package require cflib 1.6.0
+package require sugar
+
+namespace eval deb {
+	variable debug	0
+	proc make_deb {settings files} { #<<<
+		variable templates
+		variable debug
+
+		set installfiles_script {#!/usr/bin/env cfkit8.6
+
+			proc writefile {fn data} {
+				set dir	[file dirname [file normalize [file join [pwd] $fn]]]
+				if {![file exists $dir]} {
+					file mkdir $dir
+				}
+				set h	[open $fn w]
+				try {
+					chan configure $h -translation binary -encoding binary
+					chan puts -nonewline $h $data
+				} finally {
+					chan close $h
+				}
+			}
+			lassign $::argv base
+			dict for {fn info} %FILES% {
+				set outfn	[file join $base [string trimleft $fn /]]
+				set data	[dict get $info data]
+				set perms	[dict get $info perms]
+				writefile $outfn [binary decode base64 $data]
+				file attributes $outfn -permissions $perms
+			}
+		}
+
+		set here	[file normalize [pwd]]
+		set now		[clock seconds]
+		cflib::in_tmp_dir {
+			set base	[pwd]
+			file mkdir build
+			cd build
+
+			set replacements	[dict create]
+			dict set replacements %DATE% 			[clock format $now -format "%a, %d %b %Y %H:%M:%S %z"]
+			dict set replacements %AUTHOR_NAME%		"Cyan Ogilvie"
+			dict set replacements %AUTHOR_EMAIL%	"cyan.ogilvie@gmail.com"
+			dict set replacements %PACKAGE_NAME%	""
+			dict set replacements %VERSION%			"0.1"
+			dict set replacements %RELEASE%			"1"
+			dict set replacements %SECTION%			"utils"
+			dict set replacements %SUMMARY%			"No summary"
+			dict set replacements %DESCRIPTION%		"No description"
+			dict set replacements %DEPENDS%			{}
+
+			set replacements	[dict merge $replacements $settings]
+
+			if {![dict exists $replacements %LICENSE%]} {
+				dict set replacements %LICENSE%			"Copyright (C) [clock format [clock seconds] -format %Y] [dict get $replacements %AUTHOR_NAME%] <[dict get $replacements %AUTHOR_EMAIL%]>\nAll rights reserved"
+			}
+			set depends [join [dict get $replacements %DEPENDS%] ", "]
+			if {$depends ne ""} {
+				set depends	", $depends"
+			}
+			dict set replacements %DEPENDS% $depends
+
+			dict set replacements %SUMMARY%	[string trim [dict get $replacements %SUMMARY%]]
+
+			set description	""
+			foreach line [split [string trim [dict get $replacements %DESCRIPTION%]] \n] {
+				append description	" " [string trim $line] \n
+			}
+			dict set replacements %DESCRIPTION% $description
+
+			set outfiles	[dict create]
+			dict for {fn data} $templates {
+				dict set outfiles	$fn [string map $replacements $data]
+			}
+
+			dict for {fn info} $outfiles {
+				set data	[dict get $info data]
+				set perms	[dict get $info perms]
+				set dir	[file dirname $fn]
+				if {![file exists $dir]} {
+					file mkdir $dir
+				}
+				cflib::writefile $fn $data
+				file attributes $fn -permissions $perms
+			}
+
+			cflib::writefile Makefile {DESTDIR=
+
+all:
+
+clean:
+
+install: all
+	./installfiles.tcl $(DESTDIR)/
+}
+			dict for {fn info} $files {
+				dict set files $fn data [binary encode base64 [dict get $info data]]
+			}
+
+			if {[dict exists $replacements %POSTINST%]} {
+				cflib::writefile [file join debian postinst] \
+						[dict get $replacements %POSTINST%]
+				file attributes [file join debian postinst] -permissions 0755
+			}
+			if {[dict exists $replacements %PRERM%]} {
+				cflib::writefile [file join debian prerm] \
+						[dict get $replacements %PRERM%]
+				file attributes [file join debian prerm] -permissions 0755
+			}
+			set installfiles_out	{}
+			foreach cmd [sugar::scriptToList $installfiles_script] {
+				set outcmd	{}
+				foreach word $cmd {
+					lassign $word type details
+					if {$type eq "TOK" && $details eq "%FILES%"} {
+						set word	[list TOK "\[[list dict create {*}$files]\]"]
+					}
+					lappend outcmd	$word
+				}
+				lappend installfiles_out	$outcmd
+			}
+			cflib::writefile installfiles.tcl [sugar::listToScript $installfiles_out]
+			file attributes installfiles.tcl -permissions 0755
+
+			try {
+				exec -ignorestderr -- dpkg-buildpackage -b -uc
+			} on error {errmsg options} {
+				if {$::deb::debug} {
+					exec $::env(SHELL) <@ stdin >@ stdout 2>@ stderr
+				}
+			}
+			cd $base
+			set built	[lindex [glob -nocomplain -type f *.deb] 0]
+			if {$built eq ""} {
+				error "No deb built"
+			}
+			set deb_data	[cflib::readfile $built binary]
+		}
+		list [file tail $built] $deb_data
+	}
+
+	#>>>
+}
+namespace eval deb {	variable templates [dict create]
+	dict set templates debian/dirs perms 00644
+	dict set templates debian/dirs data {usr/bin
+}
+	dict set templates debian/control perms 00644
+	dict set templates debian/control data {Source: %PACKAGE_NAME%
+Section: %SECTION%
+Priority: extra
+Maintainer: %AUTHOR_NAME% <%AUTHOR_EMAIL%>
+Build-Depends: debhelper (>= 7)
+Standards-Version: 3.8.1
+
+Package: %PACKAGE_NAME%
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}%DEPENDS%
+Description: %SUMMARY%
+%DESCRIPTION%
+}
+	dict set templates debian/rules perms 00755
+	dict set templates debian/rules data {#!/usr/bin/make -f
+# -*- makefile -*-
+# Sample debian/rules that uses debhelper.
+# This file was originally written by Joey Hess and Craig Small.
+# As a special exception, when this file is copied by dh-make into a
+# dh-make output file, you may use that output file without restriction.
+# This special exception was added by Craig Small in version 0.37 of dh-make.
+
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
+
+
+
+
+
+configure: configure-stamp
+configure-stamp:
+	dh_testdir
+	# Add here commands to configure the package.
+
+	touch configure-stamp
+
+
+build: build-stamp
+
+build-stamp: configure-stamp  
+	dh_testdir
+
+	# Add here commands to compile the package.
+	$(MAKE)
+	#docbook-to-man debian/%PACKAGE_NAME%.sgml > cfkit.1
+
+	touch $@
+
+clean: 
+	dh_testdir
+	dh_testroot
+	rm -f build-stamp configure-stamp
+
+	# Add here commands to clean up after the build process.
+	$(MAKE) clean
+
+	dh_clean
+
+install: build
+	dh_testdir
+	dh_testroot
+	dh_prep   --exclude ./build/win32/tk/Makefile.orig --exclude ./build/win32/tcl/Makefile.orig
+	dh_installdirs
+
+	# Add here commands to install the package into debian/%PACKAGE_NAME%.
+	$(MAKE) DESTDIR=$(CURDIR)/debian/%PACKAGE_NAME% install
+
+
+# Build architecture-independent files here.
+binary-indep: install
+# We have nothing to do by default.
+
+# Build architecture-dependent files here.
+binary-arch: install
+	dh_testdir
+	dh_testroot
+	dh_installchangelogs 
+	dh_installdocs
+	dh_installexamples
+#	dh_install
+#	dh_installmenu
+#	dh_installdebconf
+#	dh_installlogrotate
+#	dh_installemacsen
+#	dh_installpam
+#	dh_installmime
+#	dh_python
+#	dh_installinit
+#	dh_installcron
+#	dh_installinfo
+	dh_installman
+	dh_link
+#	dh_strip
+	dh_compress
+	dh_fixperms
+#	dh_perl
+#	dh_makeshlibs
+	dh_installdeb
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+binary: binary-indep binary-arch
+.PHONY: build clean binary-indep binary-arch binary install configure
+}
+	dict set templates debian/changelog perms 00644
+	dict set templates debian/changelog data {%PACKAGE_NAME% (%VERSION%-%RELEASE%) unstable; urgency=low
+
+  * tbuild generated package - no changelog history available, sorry.
+
+ -- %AUTHOR_NAME% <%AUTHOR_EMAIL%>  %DATE%
+}
+	dict set templates debian/compat perms 00644
+	dict set templates debian/compat data {7
+}
+	dict set templates debian/copyright perms 00644
+	dict set templates debian/copyright data {%LICENSE%
+}
+}
+package provide dsl 0.4
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+namespace eval dsl {}
+
+proc dsl::decomment {in} { #<<<
+	set out	""
+
+	foreach line [split $in \n] {
+		if {[string index [string trim $line] 0] eq "#"} continue
+		append out	$line "\n"
+	}
+
+	return $out
+}
+
+#>>>
+# Reserved dsl commands:
+#	if
+#	info
+#	rename
+#	apply
+#	foreach
+#	namespace
+proc dsl::dsl_eval {interp dsl_commands dsl_script args} { #<<<
+	set aliases_old	{}
+	set tmpns		::_dsl_[incr ::dsl::seq]
+	set cmds		{}
+	try {
+		interp eval $interp [format {namespace eval %s {}} [list $tmpns]]
+		foreach {cmdname cmdargs cmdbody} [dsl::decomment $dsl_commands] {
+			if {$cmdname in {if info rename apply foreach namespace}} {
+				error "\"$cmdname\" is a reserved word and cannot be used for a DSL command"
+			}
+			interp eval $interp [format {
+				if {[info commands ::%1$s] ne ""} {
+					rename ::%1$s %2$s::%1$s
+				}
+			} [list $cmdname] [list $tmpns]]
+			lappend cmds	$cmdname
+			#set alias	[interp alias $interp $cmdname]
+			#if {$alias eq ""} {
+			#	dict set aliases_old $cmdname [list {}]
+			#} else {
+			#	dict set aliases_old $cmdname [list [interp target $interp $cmdname] $alias]
+			#}
+
+			interp alias $interp $cmdname {} apply [list $cmdargs $cmdbody [uplevel {namespace current}]] {*}$args
+		}
+
+		if {$interp eq {}} {
+			apply [list {} $dsl_script [uplevel 1 {namespace current}]]
+		} else {
+			interp eval $interp $dsl_script
+		}
+	} finally {
+		#dict for {cmdname oldalias} $aliases_old {
+		#	interp alias $interp $cmdname {*}$oldalias
+		#}
+		interp eval $interp [format {
+			apply {{} {
+				foreach cmd %2$s {
+					rename ::$cmd {}
+					if {[info commands %1$s::$cmd] ne ""} {
+						rename %1$s::$cmd ::$cmd
+					}
+				}
+				namespace delete %1$s
+			}}
+		} [list $tmpns] [list $cmds]]
+	}
+}
+
+#>>>
+
+package provide rpm 0.2
+package require cflib 1.2
+#!/usr/bin/env cfkit8.6
+
+package require cflib 1.2
+
+namespace eval rpm {
+	proc run {args} { #<<<
+		puts "Running: ($args) in ([pwd])"
+		set cmd	$args
+		lassign [chan pipe] readpipe writepipe
+		lassign [chan pipe] e_readpipe e_writepipe
+		try {
+			lappend cmd >@ $writepipe 2>@ $e_writepipe
+			set handle	[open |$cmd w]
+			chan close $writepipe
+			chan close $e_writepipe
+			chan configure $handle \
+					-blocking 0 \
+					-translation binary \
+					-encoding binary
+			chan configure $handle -blocking 1
+			chan close $handle
+		} trap {CHILDSTATUS} {errmsg options} {
+			set exitstatus	[lindex [dict get $options -errorcode] 2]
+
+			set output		[chan read $readpipe]
+			set e_output	[chan read $e_readpipe]
+
+			throw [list CHILDSTATUS $exitstatus $output] $e_output
+		} on ok {} {
+			set output		[chan read $readpipe]
+			set e_output	[chan read $e_readpipe]
+			return [list $output $e_output]
+		} finally {
+			if {[info exists readpipe]} {
+				if {$readpipe in [chan names]} {
+					chan close $readpipe
+				}
+				unset readpipe
+			}
+			if {[info exists e_readpipe]} {
+				if {$e_readpipe in [chan names]} {
+					chan close $e_readpipe
+				}
+				unset e_readpipe
+			}
+		}
+	}
+
+	#>>>
+	proc rpm {args} { #<<<
+		try {
+			run rpm {*}$args
+		} on ok {res} {
+			return [string trim [lindex $res 0]]
+		}
+	}
+
+	#>>>
+	proc rpmbuild {args} { #<<<
+		lassign [run rpmbuild {*}$args] stdout stderr
+		list [string trim $stdout] [string trim $stderr]
+	}
+
+	#>>>
+	proc build_spec {spec files} { #<<<
+		set specdata	""
+		append specdata	[subst -novariables -nobackslashes {Name:		[dict get $spec name]
+Version:	[dict get $spec version]
+Release:	[dict get $spec release]
+Source:		[dict get $spec sourcetar]
+License:	[dict get $spec license]
+Vendor:		[dict get $spec vendor]
+Group:		[dict get $spec group]
+BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-buildroot
+}]
+		if {[llength [dict get $spec requires]] > 0} {
+			append specdata	[subst -novariables -nobackslashes {Requires:	[join [dict get $spec requires] " "]
+}]
+		}
+		append specdata [subst -novariables -nobackslashes {Summary:	[dict get $spec summary]
+
+%description
+[dict get $spec description]
+
+# We need to redefine __os_install_post to prevent it stripping the binaries,
+# which breaks for us because it distrupts the appended metakit databases
+%define __os_install_post   /usr/lib/rpm/brp-compress; echo "Not stripping"
+
+%prep
+%setup -q
+
+%build
+
+%install
+rm -rf $RPM_BUILD_ROOT
+}]
+		dict for {src dst} $files {
+			if {[file type $src] eq "directory"} {
+				append specdata "install -d \"\$RPM_BUILD_ROOT/[string trimleft [file dirname $dst] /]\"\n"
+				append specdata "rsync -a \"$src\" \"\$RPM_BUILD_ROOT/[string trimleft [file dirname $dst] /]\"\n"
+			} else {
+				if {[file executable $src]} {
+					set mode	"0755"
+				} else {
+					set mode	"0644"
+				}
+				append specdata [subst -novariables -nobackslashes {install -d "$RPM_BUILD_ROOT/[string trimleft [file dirname $dst] /]"
+install --mode [set mode] "[set src]" "$RPM_BUILD_ROOT/[string trimleft [set dst] /]"
+}]
+			}
+		}	
+		append specdata [subst -novariables -nobackslashes {
+%clean
+rm -rf $RPM_BUILD_ROOT
+
+%post
+[dict get $spec post_scriptlet]
+
+%preun
+[dict get $spec preun_scriptlet]
+
+%files
+}]
+		dict for {src dst} $files {
+			if {[file type $src] eq "directory"} {
+				#append specdata "%dir " $dst "\n"
+				append specdata $dst "\n"
+			} else {
+				append specdata $dst "\n"
+			}
+		}
+
+		return $specdata
+	}
+
+	#>>>
+	proc make_rpm {spec files {target ""}} { #<<<
+		try {
+			set sourcedir	[rpm --eval %_sourcedir]
+			set specdir		[rpm --eval %_specdir]
+			set rpmout		"rpmout"
+
+			set specfile	[file join $specdir testspec.spec]
+			set sourcetar	[file join $sourcedir [dict get $spec sourcetar]]
+
+			set specdata	[build_spec $spec $files]
+
+			set fp	[open $specfile w]
+			puts $fp $specdata
+			close $fp
+
+			set here	[pwd]
+			cflib::in_tmp_dir {
+				set tarbase	[dict get $spec name]-[dict get $spec version]
+				file mkdir $tarbase
+
+				dict for {src dst} $files {
+					if {[string index $src 0] eq "/"} {
+						set fqsrc	$src
+						set src	[string range $src 1 end]
+					} else {
+						set fqsrc	[file join $here $src]
+					}
+					set prefix	[file dirname $src]
+					set dstdir	[file join $tarbase $prefix]
+					if {![file exists $dstdir]} {
+						file mkdir $dstdir
+					}
+					set dsttail	[file tail $src]
+					try {
+						file copy -- $fqsrc [file join $dstdir $dsttail]
+					} on error {errmsg options} {
+						puts stderr "Error copying file: $errmsg"
+						return -options $options $errmsg
+					}
+				}
+				run tar czf $sourcetar $tarbase
+			}
+
+			if {[info exists target] && $target ne ""} {
+				try {
+					rpmbuild --target $target -bb $specfile
+				} trap {CHILDSTATUS} {errmsg options} {
+					puts stderr "rpmbuild error:\n$errmsg"
+					return -options $options $errmsg
+				} on ok {res} {
+					lassign $res buildoutput buildstderr
+				}
+			} else {
+				set buildoutput	[rpmbuild -bb $specfile]
+			}
+			set outfiles	{}
+			foreach line [split $buildoutput \n] {
+				if {[string match "Wrote: *" $line]} {
+					if {![regexp {^Wrote:\s+(.*)$} $line -> fn]} {
+						puts stderr "Couldn't parse output filename from \"$line\""
+						continue
+					}
+					if {![file exists $rpmout]} {
+						file mkdir $rpmout
+					}
+					file copy -force -- $fn $rpmout
+					puts "Wrote [file join $rpmout [file tail $fn]]"
+					file delete -- $fn
+					lappend outfiles [file join $rpmout [file tail $fn]]
+				}
+			}
+			return $outfiles
+		} finally {
+			if {[info exists specfile] && [file exists $specfile]} {
+				file delete -- $specfile
+			}
+			if {[info exists sourcetar] && [file exists $sourcetar]} {
+				file delete -- $sourcetar
+			}
+		}
+	}
+
+	#>>>
+}
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+package require cflib
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+cflib::pclass create sop::signal {
+	superclass cflib::handlers cflib::baselog
+
+	property name		""	_name_changed
+	property debugmode	0
+	property output_handler_warntime	3000
+
+	variable {*}{
+		outputs
+		cleanups
+		o_state
+		afterids
+		changewait
+		seq
+	}
+
+	method _name_changed {} { #<<<
+		set baselog_instancename	$name
+	}
+
+	#>>>
+
+	constructor {accessvar args} { #<<<
+		my variable outputs o_state
+		set name		""
+		set outputs		{}
+		set o_state		0
+		set seq			0
+
+		set cleanups	[dict create]
+		set afterids	[dict create]
+		array set changewait	{}
+
+		my configure {*}$args
+
+		upvar $accessvar scopevar
+		set scopevar	[self]
+		trace variable scopevar u [namespace code {my _scopevar_unset}]
+	}
+
+	#>>>
+	destructor { #<<<
+		my _debug debug "tlc::Signal::destructor: [self] $name dieing"
+		#trace vdelete scopevar u [namespace code {my _scopevar_unset}]
+		if {$debugmode} {
+			dict for {tag afterid} $afterids {
+				after cancel $afterid
+				dict unset afterids $tag
+			}
+		}
+		foreach output $outputs {
+			my _debug debug "tlc::Signal::destructor: ------ twitch: ($output)"
+			my detach_output $output
+		}
+
+		foreach {key info} [array get changewait] {
+			my _debug debug "notifying waiting changewait($key) of our death"
+			set rest	[lassign $info type state]
+			if {$state ne "waiting"} continue
+			switch -- $type {
+				coro {
+					set coro	[lindex $rest 0]
+					set changewait($key)	[list $type "source_died"]
+					$coro "source_died"
+				}
+
+				vwait {
+					set changewait($key)	[list $type "source_died"]
+				}
+
+				default {
+					my _debug error "Invalid changewait type ($type) when trying to signal source death"
+				}
+			}
+		}
+		if {[self next] ne {}} {next}
+		my _debug debug "tlc::Signal::destructor: [self] truely dead"
+	}
+
+	#>>>
+
+	method state {args} { #<<<
+		switch -exact -- [llength $args] {
+			0		{set o_state}
+			default	{tailcall my set_state {*}$args}
+		}
+	}
+
+	#>>>
+	method set_state {newstate} { #<<<
+		my variable o_state
+		if {![string is boolean -strict $newstate]} {
+			throw [list not_a_boolean $newstate] \
+					"newstate must be a valid boolean"
+		}
+		if {$newstate} {
+			set normstate	1
+		} else {
+			set normstate	0
+		}
+		my _on_set_state $normstate
+		if {$o_state == $normstate} return
+		set o_state	$normstate
+		my _update_outputs
+	}
+
+	#>>>
+	method toggle_state {} { #<<<
+		my variable o_state
+		my set_state [expr {!$o_state}]
+	}
+
+	#>>>
+
+	method attach_output {handler {cleanup {}}} { #<<<
+		my variable outputs
+		if {$handler in $outputs} {
+			return 0
+		}
+
+		lappend outputs $handler
+		
+		if {$cleanup ne {}} {
+			dict set cleanups $handler	$cleanup
+		}
+		my _update_output $handler
+		
+		return 1
+	}
+
+	#>>>
+	method detach_output {handler} { #<<<
+		my _debug debug "tlc::Signal::detach_output: ($handler)"
+		if {$handler in $outputs} {
+			set idx			[lsearch $outputs $handler]
+			set outputs		[lreplace $outputs $idx $idx]
+
+			if {[dict exists $cleanups $handler]} {
+				my _debug debug "tlc::Signal::detach_output: cleaning up ($handler)"
+				my _debug debug "tlc::Signal::detach_output: foo"
+				coroutine coro_handler_cleanup_[incr ::coro_seq] \
+					{*}[dict get $cleanups $handler]
+				my _debug debug "tlc::Signal::detach_output: bar"
+				dict unset cleanups $handler
+			}
+			
+			return 1
+		} else {
+			my _debug debug "tlc::Signal:detach_output: output not found!!\n($handler)\n[join $outputs \n]]\n============================="
+			return 0
+		}
+	}
+
+	#>>>
+
+	method name {} { #<<<
+		return $name
+	}
+
+	#>>>
+	method explain_txt {{depth 0}} { #<<<
+		return "[string repeat {  } $depth][self] \"[[self] name]\": [[self] state]\n"
+	}
+
+	#>>>
+
+	method waitfor {sense {timeout 0}} { #<<<
+		if {$sense} {
+			if {[my state]} return
+			set normsense	1
+		} else {
+			if {![my state]} return
+			set normsense	0
+		}
+
+		set signame	[my name]
+		set myseq	[incr seq]
+
+		if {$timeout != 0} {
+			set afterid \
+					[after $timeout [namespace code [list my _changewait_timeout $myseq]]]
+			dict set afterids waitfor_$myseq	$afterid
+		}
+
+		set resolved	0
+		while {!($resolved)} {
+			if {[info coroutine] ne ""} {
+				set changewait($myseq)	[list coro "waiting" [info coroutine]]
+				set res	[yield]
+			} else {
+				# Blegh
+				my _debug warning "Warning: using vwait implementation of waitfor.  Calling from a coroutine context is strongly advised"
+				set changewait($myseq)	[list vwait "waiting"]
+				my _debug debug "tlc::Signal::waitfor: Waiting for [namespace which -variable changewait]($myseq)"
+				vwait [namespace which -variable changewait]($myseq)
+				set res	[lindex $changewait($myseq) 1]
+			}
+			if {[string is boolean $res] && [my state] != $normsense} {
+				log warning "Woken up by transient spike while waiting for state $sense, waiting for more permanent change ($name)"
+				?? {
+					if {[info object class [self]] eq "::sop::gate"} {
+						log warning [my explain_txt]
+					}
+				}
+				set resolved	0
+			} else {
+				set resolved	1
+			}
+		}
+
+		if {[info exists afterid]} {
+			after cancel $afterid
+			unset afterid
+		}
+
+		if {$res ne "source_died"} {
+			# in the case where we have died, these data members have
+			# disappeared, and to try to access them (like unsetting them)
+			# causes a segfault
+
+			dict unset afterids waitfor_$myseq
+			array unset changewait $myseq
+		}
+
+		switch -- $res {
+			1 -
+			0 {
+				return
+			}
+
+			"timeout" {
+				throw [list timeout $signame] \
+						"Timeout waiting for signal \"$signame\""
+			}
+
+			"source_died" {
+				throw [list source_died $signame] \
+						"Source died while waiting for signal \"$signame\""
+			}
+
+			default {
+				error "Unexpected result waiting for signal \"$signame\": ($res)"
+			}
+		}
+	}
+
+	#>>>
+
+	method _update_output {handler} { #<<<
+		my variable o_state
+		#puts stderr "Signal::_update_output($o_state): $name ([self]) update output ($handler)"
+		if {$debugmode} {
+			set pending_afterid	[after $output_handler_warntime \
+					[namespace code [list my _throw_hissy $handler]]]
+			dict set afterids update_output_$handler	$pending_afterid
+		}
+		try {
+			coroutine coro_update_output_[incr ::coro_seq] \
+					{*}$handler $o_state
+		} on error {errmsg options} {
+			my log error "\n\"$name\" error updating output ($o_state) handler: ($handler) $name ([self]): $errmsg\n[dict get $options -errorinfo]"
+		}
+		if {$debugmode} {
+			after cancel $pending_afterid
+			dict unset afterids	update_output_$handler
+		}
+		#puts stderr "Signal::_update_output: $name ([self]) done"
+	}
+
+	#>>>
+	method _update_outputs {} { #<<<
+		my variable outputs
+		foreach output $outputs {
+			my _update_output $output
+		}
+		my _debug debug "tlc::Signal::_update_outputs: Flagging changewaits: ([array names changewait])"
+		foreach {key info} [array get changewait] {
+			my _debug debug "tlc::Signal::_update_outputs: flagging state change for waiting vwait: changewait($key) to ($o_state)"
+			set rest	[lassign $info type state]
+			if {$state ne "waiting"} continue
+			switch -- $type {
+				coro {
+					set coro	[lindex $rest 0]
+					set changewait($key)	[list "coro" $o_state]
+					after idle [list $coro $o_state]
+				}
+
+				vwait {
+					set changewait($key)	[list "vwait" $o_state]
+				}
+
+				default {
+					my _debug error "Invalid changewait type: ($type)"
+				}
+			}
+		}
+	}
+
+	#>>>
+	method _debug {level msg} { #<<<
+		my invoke_handlers _debug $level $msg
+	}
+
+	#>>>
+	method _on_set_state {pending} { #<<<
+	}
+
+	#>>>
+	method _throw_hissy {handler} { #<<<
+		log warning "name: ($name) obj: ([self]) taking way too long to update output for handler: ($handler)"
+	}
+
+	#>>>
+	method _scopevar_unset {args} { #<<<
+		#puts stderr "Signal::_scopevar_unset: $name ([self]) scopevar unset"
+		if {$debugmode} {
+			my _debug debug "tlc::Signal::_scopevar_unset"
+		}
+		my destroy
+	}
+
+	#>>>
+	method _changewait_timeout {myseq} { #<<<
+		if {![info exists changewait($myseq)]} {
+			my _debug error "cannot timeout: changewait($myseq) vanished!"
+			return
+		}
+		set rest	[lassign $changewait($myseq) type state]
+		if {$state ne "waiting"} return
+		switch -- $type {
+			coro {
+				set coro	[lindex $rest 0]
+				set changewait($myseq)	[list "coro" "timeout"]
+				after idle [list $coro "timeout"]
+			}
+
+			vwait {
+				set changewait($myseq)	[list "vwait" "timeout"]
+			}
+
+			default {
+				my _debug error "Invalid changewait type: ($type)"
+			}
+		}
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+cflib::pclass create sop::gate {
+	superclass sop::signal
+
+	pclass_config {
+		constructor_auto_next	0
+	}
+
+	property mode		"or"	_mode_changed
+	property default	0		_default_changed
+
+	method _mode_changed {} { #<<<
+		set valid_modes	{and nand nor or}
+		if {$mode ni $valid_modes} {
+			throw {PROPERTY INVALID} "-mode must be one of ([join $valid_modes {, }])"
+		}
+		my _calc_o_state
+	}
+
+	#>>>
+	method _default_changed {} { #<<<
+		my _calc_o_state
+	}
+
+	#>>>
+
+	variable {*}{
+		inputs
+		sense
+		isvar
+		var_inputs
+	}
+
+	constructor {accessvar args} { #<<<
+		upvar $accessvar scopevar
+		next $accessvar
+
+		set inputs		[dict create]
+		set sense		[dict create]
+		set isvar		[dict create]
+		set var_inputs	{}
+
+		my configure {*}$args
+	}
+
+	#>>>
+	destructor { #<<<
+		foreach var_input $var_inputs {
+			my detach_var_input $var_input
+		}
+		foreach input [dict keys $inputs] {
+			try {
+				if {[my _isa_signal $input]} {
+					$input detach_output [my code _input_update $input]
+				}
+			} on error {errmsg options} {
+				puts stderr "Error detatching input ($input) during game destructor: $errmsg\n[dict get $options -errorinfo]"
+			}
+		}
+	}
+
+	#>>>
+	
+	method attach_input {gate_obj {a_sense normal}} { #<<<
+		if {![my _isa_signal $gate_obj]} {
+			error "$gate_obj isn't a sop::signal"
+		}
+
+		#$gate_obj register_handler debug [my code _debug]
+		dict set sense $gate_obj	[expr {$a_sense ne "normal"}]
+
+		return [$gate_obj attach_output [my code _input_update $gate_obj] \
+				[my code _cleanup $gate_obj]]
+	}
+
+	#>>>
+	method detach_input {gate_obj} { #<<<
+		if {![my _isa_signal $gate_obj]} {
+			error "$gate_obj isn't a sop::signal"
+		}
+
+		my _debug debug "tlc::Gate::detach_input ([self]): ($gate_obj)"
+
+		set ok	[catch {unset inputs($gate_obj)} msg]
+		dict unset inputs $gate_obj
+		
+		$gate_obj detach_output [my code _input_update $gate_obj]
+
+		my _calc_o_state
+	}
+
+	#>>>
+	method detach_all_inputs {} { #<<<
+		foreach vinput $var_inputs {
+			my detach_var_input $vinput
+		}
+		foreach gate_obj [dict keys $inputs] {
+			detach_input $gate_obj
+		}
+	}
+
+	#>>>
+	method attach_var_input {varname {a_sense normal}} { #<<<
+		if {$varname ni $var_inputs} {
+			lappend var_inputs	$varname
+		}
+		dict set isvar [self]::$varname	$varname
+		dict set sense [self]::$varname	[expr {$a_sense eq "inverted"}]
+		trace add variable $varname {write unset} \
+				[my code _var_input_update $varname]
+
+		my _var_input_update $varname $varname "" write
+	}
+
+	#>>>
+	method detach_var_input {varname} { #<<<
+		set idx			[lsearch $var_inputs $varname]
+		set var_inputs	[lreplace $var_inputs $idx $idx]
+		trace remove variable $varname {write unset} \
+				[my code _var_input_update $varname]
+
+		dict unset inputs [self]::$varname
+		dict unset sense [self]::$varname
+		dict unset isvar [self]::$varname
+
+		my _calc_o_state
+	}
+
+	#>>>
+
+	method explain_state {} { #<<<
+		return $inputs
+	}
+
+	#>>>
+	method explain_txt {{depth 0}} { #<<<
+		set txt	""
+		set firstdepth	[expr {($depth > 0) ? $depth-1 : 0}]
+		append txt "[self] \"[[self] name]\": [[self] state]\[$default\] [string toupper $mode] (\n"
+		foreach key [dict keys $inputs] {
+	#		append txt "[string repeat {  } $firstdepth]"
+			append txt "[string repeat {  } $depth]"
+			append txt [dict get $inputs $key]
+			append txt [expr {[dict get $sense $key] ? "i" : " "}]
+			if {[dict exists $isvar $key]} {
+				append txt "[self] var_input: [dict get $isvar $key] ([dict get $inputs $key])\n"
+			} else {
+				append txt [$key explain_txt [expr {$depth + 1}]]
+			}
+		}
+		append txt "[string repeat {  } $depth])\n"
+
+		return $txt
+	}
+
+	#>>>
+
+	method _calc_o_state {} { #<<<
+		if {[dict size $inputs] == 0} {
+			set new_o_state		$default
+		} else {
+			switch [string tolower $mode] {
+				"and" - "nor"	{set assume	1}
+				"nand" - "or"	{set assume	0}
+			}
+
+			dict for {input state} $inputs {
+				switch [string tolower $mode] {
+					"and" - "nand"	{
+						if {!($state)} {
+							set assume	[expr {!($assume)}]
+							break
+						}
+					}
+
+					"or" - "nor"	{
+						if {$state} {
+							set assume	[expr {!($assume)}]
+							break
+						}
+					}
+				}
+			}
+
+			set new_o_state		$assume
+		}
+
+		my set_state $new_o_state
+	}
+
+	#>>>
+	method _input_update {gate_obj state} { #<<<
+		if {[dict get $sense $gate_obj]} {
+			set state	[expr {!$state}]
+		}
+		my _debug debug "tlc::Gate::input_update ([self]) ($name): ($gate_obj) ($state)"
+		dict set inputs $gate_obj	$state
+
+		my _calc_o_state
+	}
+
+	#>>>
+	method _var_input_update {varname n1 n2 op} { #<<<
+		upvar $varname value
+		switch $op {
+			write {
+				if {![info exists value]} {
+					error "var doesn't exist!  ($varname)"
+				}
+				set state	[expr {
+					[string is boolean $value] && $value
+				}]
+				if {[dict get $sense [self]::$varname]} {
+					set state	[expr {!($state)}]
+				}
+				dict set inputs [self]::$varname $state
+
+				my _calc_o_state
+			}
+
+			unset {
+				my detach_var_input $varname
+			}
+		}
+	}
+
+	#>>>
+	method _cleanup {gate_obj} { #<<<
+		my detach_input $gate_obj
+	}
+
+	#>>>
+	method _isa_signal {obj} { #<<<
+		expr {
+			[info object isa typeof $obj sop::signal] ||
+			([itcl::is object $obj] && [$obj isa tlc::Signal])
+		}
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+cflib::pclass create sop::signalsource {
+	constructor {} { #<<<
+		if {[self next] ne {}} {next}
+		array set signals	{}
+	}
+
+	#>>>
+	destructor { #<<<
+		array unset signals
+		if {[self next] ne {}} {next}
+	}
+
+	#>>>
+
+	protected_property signals
+
+	method signal_ref {signal} { #<<<
+		if {![info exists signals($signal)]} {
+			error "Invalid signal ($signal)" "" [list invalid_signal $signal]
+		}
+		return $signals($signal)
+	}
+
+	#>>>
+	method signal_state {signal} { #<<<
+		if {![info exists signals($signal)]} {
+			error "Invalid signal ($signal)" "" [list invalid_signal $signal]
+		}
+		return [$signals($signal) state]
+	}
+
+	#>>>
+	method waitfor {signal {timeout 0}} { #<<<
+		if {![info exists signals($signal)]} {
+			throw [list invalid_signal $signal] "Invalid signal ($signal)"
+		}
+		$signals($signal) waitfor true $timeout
+	}
+
+	#>>>
+	method signals_available {} { #<<<
+		set build	{}
+		foreach signame [lsort -dictionary [array names signals]] {
+			lappend build	$signame $signals($signame)
+		}
+		return $build
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+# Signals:
+#	onchange()					- Fired when a variable changes value
+#	onchange_info(n1, n2, op)	- Fired when a variable changes value
+
+cflib::pclass create sop::varwatch {
+	superclass sop::signal
+
+	pclass_config {
+		constructor_auto_next	0
+	}
+
+	variable {*}{
+		watchvars
+		lock
+		afterids
+		dominos
+	}
+
+	constructor {accessvar args} { #<<<
+		set watchvars		{}
+		set lock			0
+		set afterids		{}
+		array set dominos	{}
+
+		sop::domino new dominos(onchange) -name "[self] onchange"
+
+		if {"oo::Helpers::cflib" ni [namespace path]} {
+			namespace path [concat [namespace path] {
+				::oo::Helpers::cflib
+			}]
+		}
+
+		$dominos(onchange) attach_output [code invoke_handlers onchange]
+
+		upvar $accessvar scopevar
+		next $accessvar
+
+		my configure {*}$args
+	}
+
+	#>>>
+	destructor { #<<<
+		if {[info exists dominos(onchange)] && [info object isa object $dominos(onchange)]} {
+			$dominos(onchange) destroy
+			array unset dominos onchange
+		}
+		foreach var $watchvars {
+			my detach_dirtyvar $var
+		}
+		foreach afterid $afterids {
+			after cancel $afterid
+		}
+		set afterids	{}
+		if {[self next] ne ""} next
+	}
+
+	#>>>
+
+	method attach_dirtyvar {varname} { #<<<
+		if {$varname ni $watchvars} {
+			lappend watchvars	$varname
+		}
+		trace add variable $varname {write unset} [code _var_update]
+	}
+
+	#>>>
+	method detach_dirtyvar {varname} { #<<<
+		set idx			[lsearch $watchvars $varname]
+		set watchvars	[lreplace $watchvars $idx $idx]
+		trace remove variable $varname {write unset} [code _var_update]
+	}
+
+	#>>>
+	method arm {} {incr lock -1}
+	method disarm {} {incr lock}
+	method is_armed {} {expr {$lock > 0}}
+	method force_if_pending {} { #<<<
+		set pending		$afterids
+		set afterids	{}
+		foreach afterid $pending {
+			set script	[lindex [after info $afterid] 0]
+			after cancel $afterid
+			if {$script ne ""} {
+				try {
+					uplevel #0 $script
+				} on error {errmsg options} {
+					puts [dict get $options -errorinfo]
+				}
+			}
+		}
+		$dominos(onchange) force_if_pending
+	}
+
+	#>>>
+	method _on_set_state {pending} { #<<<
+		set pending		$afterids
+		set afterids	{}
+		foreach afterid $pending {
+			after cancel $afterid
+		}
+	}
+
+	#>>>
+	method _var_update {n1 n2 op} { #<<<
+		if {$lock > 0} return
+		my set_state 1
+		if {[my handlers_available onchange_info]} {
+			lappend afterids	[after idle [code fire_onchange $n1 $n2 $op]]
+		}
+		$dominos(onchange) tip
+	}
+
+	#>>>
+	method _fire_onchange {n1 n2 op} { #<<<
+		my invoke_handlers onchange_info $n1 $n2 $op
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+cflib::pclass create sop::statetoggle {
+	superclass sop::gate
+	mixin cflib::baselog
+
+	pclass_config {
+		constructor_auto_next	0
+	}
+
+	property explain	0
+
+	variable {*}{
+		name
+		target
+		toggles
+		deleting
+		lasterror
+	}
+
+	constructor {accessvar args} { #<<<
+		set deleting	0
+
+		upvar $accessvar scopevar
+		next $accessvar
+
+		if {"oo::Helpers::cflib" ni [namespace path]} {
+			namespace path [concat [namespace path] {
+				::oo::Helpers::cflib
+			}]
+		}
+
+		set configureargs	{}
+		# Process in-line configure arguments
+		while {[string index [lindex $args 0] 0] eq "-"} {
+			set args	[lassign $args opt val]
+			lappend configureargs	$opt $val
+		}
+		set toggles	[lassign $args target]
+		if {![winfo exists $target]} {
+			error "Widget: ($target) is not valid"
+		}
+
+		#bind $target <Destroy> +[format {
+		#	if {[info object isa object %1$s]} {
+		#		try {
+		#			%2$s
+		#		} on error {errmsg options} {
+		#			puts stderr "Error destroying (%1$s): [dict get $options -errorinfo]"
+		#		}
+		#	}
+		#} [list [self]] [code destroy]]
+		bind $target <Destroy> +[list apply {
+			{obj} {
+				if {[info object isa object $obj]} {$obj destroy}
+			}
+		} [self]]
+
+		my configure -mode "and" {*}$configureargs
+		my configure -name "tlc::StateToggle internal [self] \"$name\""
+
+		my attach_output [code _stategate_update]
+	}
+
+	#>>>
+	destructor { #<<<
+		set deleting		1
+		my log debug "tlc::StateToggle ($target) ([self]) going away"
+		my detach_output [code _stategate_update]
+		if {[winfo exists $target]} {
+			#catch {
+			#	trace remove command $target delete [list [self] destroy]
+			#}
+		}
+	}
+
+	#>>>
+
+	method attach_signal {signal {a_sense normal}} {my attach_input $signal $a_sense}
+	method detach_signal {signal} {my detach_input $signal}
+	method force_update {} {my _stategate_update [my state]}
+	method target {} {set target}
+	method deleting {} {set deleting}
+	method explain {} { #<<<
+		set build	""
+		if {[info exists lasterror]} {
+			append build	"Last error configuring target: $lasterror" \n
+		}
+		append build [explain_txt]
+		return $build
+	}
+
+	#>>>
+
+	method _stategate_update {{newstate ""}} { #<<<
+		if {[info exists lasterror]} {unset lasterror}
+		if {$newstate ne ""} {
+			set stategate_state	$newstate
+		}
+		if {$explain} {
+			my log debug [my explain_txt]
+		}
+		set switchlist	{}
+		dict for {key values} $toggles {
+			lappend switchlist	$key [lindex $values $stategate_state]
+		}
+		if {$debugmode} {
+			my log debug "[self] Updating $target: ([state]) ($switchlist)"
+		}
+		try {
+			$target configure {*}$switchlist
+		} on error {errmsg options} {
+			set lasterror	$errmsg
+			my log error "\nError configuring $target: $errmsg\n[dict get $options -errorinfo]"
+		}
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+cflib::pclass create sop::domino {
+	superclass cflib::baselog
+
+	property name	""		_name_changed
+	property delay	"idle"
+
+	protected_property after_id	""
+	protected_property outputs	{}
+	protected_property inputs	[dict create]
+	protected_property lock		0
+
+	method _name_changed {} { #<<<
+		set baselog_instancename	$name
+	}
+
+	#>>>
+
+	constructor {accessvar args} { #<<<
+		my configure {*}$args
+
+		if {$name eq ""} {
+			my configure -name $accessvar
+		}
+
+		upvar $accessvar scopevar
+		set scopevar [self]
+		trace variable scopevar u [my code _scopevar_unset]
+	}
+
+	#>>>
+	destructor { #<<<
+		after cancel $after_id
+		foreach dom_obj [dict keys $inputs] {
+			my detach_input $dom_obj
+		}
+	}
+
+	#>>>
+
+	method tip {args} { #<<<
+		if {$lock > 0} return
+
+		if {$after_id ne ""} return
+		my _debug debug "tlc::Domino::tip: ([self]) ($name)"
+		set after_id	[after $delay [my code _tip_outputs]]
+	}
+
+	#>>>
+	method tip_now {args} { #<<<
+		my _tip_outputs
+	}
+
+	#>>>
+	method attach_output {handler} { #<<<
+		if {$handler ni $outputs} {
+			lappend outputs $handler
+			return 1
+		} else {
+			return 0
+		}
+	}
+
+	#>>>
+	method detach_output {handler} { #<<<
+		set idx		[lsearch $outputs $handler]
+		set outputs	[lreplace $outputs $idx $idx]
+	}
+
+	#>>>
+	method attach_input {dom_obj} { #<<<
+		if {![info object isa typeof $dom_obj sop::domino]} {
+			error "$dom_obj isn't a sop::domino"
+		}
+
+		dict set inputs $dom_obj	1
+
+		return [$dom_obj attach_output [my code tip]]
+	}
+
+	#>>>
+	method detach_input {dom_obj} { #<<<
+		if {![info object isa typeof $dom_obj sop::domino]} {
+			error "$dom_obj isn't a Domino"
+		}
+
+		dict unset inputs $dom_obj
+
+		return [$dom_obj detach_output [my code tip]]
+	}
+
+	#>>>
+	method pending {} { #<<<
+		expr {$after_id ne ""}
+	}
+
+	#>>>
+	method force_if_pending {} { #<<<
+		if {$after_id ne ""} {my tip_now}
+	}
+
+	#>>>
+	method cancel_if_pending {} { #<<<
+		if {$after_id ne ""} {
+			after cancel $after_id
+			set after_id	""
+		}
+	}
+
+	#>>>
+	method lock {} { #<<<
+		incr lock
+	}
+
+	#>>>
+	method unlock {} { #<<<
+		incr lock -1
+		if {$lock < 0} {
+			puts stderr "[self] lock went below zero!: $lock"
+		}
+	}
+
+	#>>>
+
+	method _debug {level msg} { #<<<
+#		invoke_handlers debug $level $msg
+	}
+
+	#>>>
+	method _tip_outputs {} { #<<<
+		after cancel $after_id
+		set after_id	""
+		foreach output $outputs {
+			try {
+				coroutine coro_domino_output_[incr ::coro_seq] {*}$output
+			} on error {errmsg options} {
+				my log error "\nerror updating output ($output):\n\t$errmsg\n[dict get $options -errorinfo]"
+			}
+		}
+	}
+
+	#>>>
+	method _scopevar_unset {args} { #<<<
+		my log debug
+		delete object [self]
+	}
+
+	#>>>
+}
+
+
 package provide sugar 0.1
 # Sugar - a macro system for Tcl
 # Copyright (C) 2004 Salvatore Sanfilippo
@@ -6786,228 +6717,297 @@ proc sugar::tailrec_convert_calls {name arglist code} {
     }
     return $code
 }
-package provide rpm 0.2
-package require cflib 1.2
-#!/usr/bin/env cfkit8.6
+package provide zip 1.2.1
+# mkzip.tcl -- Copyright (C) 2009 Pat Thoyts <patthoyts@users.sourceforge.net>
+#
+#        Create ZIP archives in Tcl.
+#
+# Create a zipkit using mkzip filename.zkit -zipkit -directory xyz.vfs
+# or a zipfile using mkzip filename.zip -directory dirname -exclude "*~"
+#
+# version 1.2
 
-package require cflib 1.2
+package require Tcl 8.6
 
-namespace eval rpm {
-	proc run {args} { #<<<
-		puts "Running: ($args) in ([pwd])"
-		set cmd	$args
-		lassign [chan pipe] readpipe writepipe
-		lassign [chan pipe] e_readpipe e_writepipe
-		try {
-			lappend cmd >@ $writepipe 2>@ $e_writepipe
-			set handle	[open |$cmd w]
-			chan close $writepipe
-			chan close $e_writepipe
-			chan configure $handle \
-					-blocking 0 \
-					-translation binary \
-					-encoding binary
-			chan configure $handle -blocking 1
-			chan close $handle
-		} trap {CHILDSTATUS} {errmsg options} {
-			set exitstatus	[lindex [dict get $options -errorcode] 2]
+namespace eval zip {}
 
-			set output		[chan read $readpipe]
-			set e_output	[chan read $e_readpipe]
-
-			throw [list CHILDSTATUS $exitstatus $output] $e_output
-		} on ok {} {
-			set output		[chan read $readpipe]
-			set e_output	[chan read $e_readpipe]
-			return [list $output $e_output]
-		} finally {
-			if {[info exists readpipe]} {
-				if {$readpipe in [chan names]} {
-					chan close $readpipe
-				}
-				unset readpipe
-			}
-			if {[info exists e_readpipe]} {
-				if {$e_readpipe in [chan names]} {
-					chan close $e_readpipe
-				}
-				unset e_readpipe
-			}
-		}
-	}
-
-	#>>>
-	proc rpm {args} { #<<<
-		try {
-			run rpm {*}$args
-		} on ok {res} {
-			return [string trim [lindex $res 0]]
-		}
-	}
-
-	#>>>
-	proc rpmbuild {args} { #<<<
-		lassign [run rpmbuild {*}$args] stdout stderr
-		list [string trim $stdout] [string trim $stderr]
-	}
-
-	#>>>
-	proc build_spec {spec files} { #<<<
-		set specdata	""
-		append specdata	[subst -novariables -nobackslashes {Name:		[dict get $spec name]
-Version:	[dict get $spec version]
-Release:	[dict get $spec release]
-Source:		[dict get $spec sourcetar]
-License:	[dict get $spec license]
-Vendor:		[dict get $spec vendor]
-Group:		[dict get $spec group]
-BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-buildroot
-}]
-		if {[llength [dict get $spec requires]] > 0} {
-			append specdata	[subst -novariables -nobackslashes {Requires:	[join [dict get $spec requires] " "]
-}]
-		}
-		append specdata [subst -novariables -nobackslashes {Summary:	[dict get $spec summary]
-
-%description
-[dict get $spec description]
-
-# We need to redefine __os_install_post to prevent it stripping the binaries,
-# which breaks for us because it distrupts the appended metakit databases
-%define __os_install_post   /usr/lib/rpm/brp-compress; echo "Not stripping"
-
-%prep
-%setup -q
-
-%build
-
-%install
-rm -rf $RPM_BUILD_ROOT
-}]
-		dict for {src dst} $files {
-			if {[file type $src] eq "directory"} {
-				append specdata "install -d \"\$RPM_BUILD_ROOT/[string trimleft [file dirname $dst] /]\"\n"
-				append specdata "rsync -a \"$src\" \"\$RPM_BUILD_ROOT/[string trimleft [file dirname $dst] /]\"\n"
-			} else {
-				if {[file executable $src]} {
-					set mode	"0755"
-				} else {
-					set mode	"0644"
-				}
-				append specdata [subst -novariables -nobackslashes {install -d "$RPM_BUILD_ROOT/[string trimleft [file dirname $dst] /]"
-install --mode [set mode] "[set src]" "$RPM_BUILD_ROOT/[string trimleft [set dst] /]"
-}]
-			}
-		}	
-		append specdata [subst -novariables -nobackslashes {
-%clean
-rm -rf $RPM_BUILD_ROOT
-
-%post
-[dict get $spec post_scriptlet]
-
-%preun
-[dict get $spec preun_scriptlet]
-
-%files
-}]
-		dict for {src dst} $files {
-			if {[file type $src] eq "directory"} {
-				#append specdata "%dir " $dst "\n"
-				append specdata $dst "\n"
-			} else {
-				append specdata $dst "\n"
-			}
-		}
-
-		return $specdata
-	}
-
-	#>>>
-	proc make_rpm {spec files {target ""}} { #<<<
-		try {
-			set sourcedir	[rpm --eval %_sourcedir]
-			set specdir		[rpm --eval %_specdir]
-			set rpmout		"rpmout"
-
-			set specfile	[file join $specdir testspec.spec]
-			set sourcetar	[file join $sourcedir [dict get $spec sourcetar]]
-
-			set specdata	[build_spec $spec $files]
-
-			set fp	[open $specfile w]
-			puts $fp $specdata
-			close $fp
-
-			set here	[pwd]
-			cflib::in_tmp_dir {
-				set tarbase	[dict get $spec name]-[dict get $spec version]
-				file mkdir $tarbase
-
-				dict for {src dst} $files {
-					if {[string index $src 0] eq "/"} {
-						set fqsrc	$src
-						set src	[string range $src 1 end]
-					} else {
-						set fqsrc	[file join $here $src]
-					}
-					set prefix	[file dirname $src]
-					set dstdir	[file join $tarbase $prefix]
-					if {![file exists $dstdir]} {
-						file mkdir $dstdir
-					}
-					set dsttail	[file tail $src]
-					try {
-						file copy -- $fqsrc [file join $dstdir $dsttail]
-					} on error {errmsg options} {
-						puts stderr "Error copying file: $errmsg"
-						return -options $options $errmsg
-					}
-				}
-				run tar czf $sourcetar $tarbase
-			}
-
-			if {[info exists target] && $target ne ""} {
-				try {
-					rpmbuild --target $target -bb $specfile
-				} trap {CHILDSTATUS} {errmsg options} {
-					puts stderr "rpmbuild error:\n$errmsg"
-					return -options $options $errmsg
-				} on ok {res} {
-					lassign $res buildoutput buildstderr
-				}
-			} else {
-				set buildoutput	[rpmbuild -bb $specfile]
-			}
-			set outfiles	{}
-			foreach line [split $buildoutput \n] {
-				if {[string match "Wrote: *" $line]} {
-					if {![regexp {^Wrote:\s+(.*)$} $line -> fn]} {
-						puts stderr "Couldn't parse output filename from \"$line\""
-						continue
-					}
-					if {![file exists $rpmout]} {
-						file mkdir $rpmout
-					}
-					file copy -force -- $fn $rpmout
-					puts "Wrote [file join $rpmout [file tail $fn]]"
-					file delete -- $fn
-					lappend outfiles [file join $rpmout [file tail $fn]]
-				}
-			}
-			return $outfiles
-		} finally {
-			if {[info exists specfile] && [file exists $specfile]} {
-				file delete -- $specfile
-			}
-			if {[info exists sourcetar] && [file exists $sourcetar]} {
-				file delete -- $sourcetar
-			}
-		}
-	}
-
-	#>>>
+# zip::timet_to_dos {time_t} <<<
+#
+#        Convert a unix timestamp into a DOS timestamp for ZIP times.
+#
+#   DOS timestamps are 32 bits split into bit regions as follows:
+#                  24                16                 8                 0
+#   +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+
+#   |Y|Y|Y|Y|Y|Y|Y|m| |m|m|m|d|d|d|d|d| |h|h|h|h|h|m|m|m| |m|m|m|s|s|s|s|s|
+#   +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+
+#
+proc zip::timet_to_dos {time_t} {
+	set s [clock format $time_t -format {%Y %m %e %k %M %S}]
+	scan $s {%d %d %d %d %d %d} year month day hour min sec
+	expr {(($year-1980) << 25) | ($month << 21) | ($day << 16) 
+		| ($hour << 11) | ($min << 5) | ($sec >> 1)}
 }
 
+#>>>
+# zip::pop {varname {nth 0}} <<<
+#
+#        Pop an element from a list
+#
+proc zip::pop {varname {nth 0}} {
+	upvar $varname args
+	set r [lindex $args $nth]
+	set args [lreplace $args $nth $nth]
+	return $r
+}
+
+#>>>
+# zip::walk {base {excludes ""} {match *} {path {}}} <<<
+#
+#        Walk a directory tree rooted at 'path'. The excludes list can be
+#        a set of glob expressions to match against files and to avoid.
+#        The match arg is internal.
+#        eg: walk library {CVS/* *~ .#*} to exclude CVS and emacs cruft.
+#
+proc zip::walk {base {excludes ""} {match *} {path {}}} {
+	set result {}
+	set imatch [file join $path $match]
+	set files [glob -nocomplain -tails -types f -directory $base $imatch]
+	foreach file $files {
+		set excluded 0
+		foreach glob $excludes {
+			if {[string match $glob $file]} {
+				set excluded 1
+				break
+			}
+		}
+		if {!$excluded} {lappend result $file}
+	}
+	foreach dir [glob -nocomplain -tails -types d -directory $base $imatch] {
+		set subdir [walk $base $excludes $match $dir]
+		if {[llength $subdir]>0} {
+			set result [concat $result [list $dir] $subdir]
+		}
+	}
+	return $result
+}
+
+#>>>
+# zip::mkzipfile {zipchan base path {comment ""}} <<<
+#
+#        Add a single file to a zip archive. The zipchan channel should
+#        already be open and binary. You may provide a comment for the
+#        file The return value is the central directory record that
+#        will need to be used when finalizing the zip archive.
+#
+# FIX ME: should  handle the current offset for non-seekable channels
+#
+proc zip::mkzipfile {zipchan base path {comment ""}} {
+	set fullpath [file join $base $path]
+	set mtime [timet_to_dos [file mtime $fullpath]]
+	if {[file isdirectory $fullpath]} {
+		append path	/
+	}
+	set utfpath [encoding convertto utf-8 $path]
+	set utfcomment [encoding convertto utf-8 $comment]
+	set flags [expr {(1<<11)}] ;# utf-8 comment and path
+	set method 0               ;# store 0, deflate 8
+	set attr 0                 ;# text or binary (default binary)
+	set version 20             ;# minumum version req'd to extract
+	set extra ""
+	set crc 0
+	set size 0
+	set csize 0
+	set data ""
+	set seekable [expr {[tell $zipchan] != -1}]
+	if {[file isdirectory $fullpath]} {
+		set attrex 0x41ff0010  ;# 0o040777 (drwxrwxrwx)
+	} elseif {[file executable $fullpath]} {
+		set attrex 0x81ff0080  ;# 0o100777 (-rwxrwxrwx)
+	} else {
+		set attrex 0x81b60020  ;# 0o100666 (-rw-rw-rw-)
+		if {[file extension $fullpath] in {".tcl" ".txt" ".c"}} {
+			set attr 1         ;# text
+		}
+	}
+
+	if {[file isfile $fullpath]} {
+		set size [file size $fullpath]
+		if {!$seekable} {set flags [expr {$flags | (1 << 3)}]}
+	}
+
+	set offset [tell $zipchan]
+	set local [binary format a4sssiiiiss PK\03\04 \
+			$version $flags $method $mtime $crc $csize $size \
+			[string length $utfpath] [string length $extra]]
+	append local $utfpath $extra
+	puts -nonewline $zipchan $local
+
+	if {[file isfile $fullpath]} {
+		# If the file is under 2MB then zip in one chunk, otherwize we use
+		# streaming to avoid requiring excess memory. This helps to prevent
+		# storing re-compressed data that may be larger than the source when
+		# handling PNG or JPEG or nested ZIP files.
+		if {$size < 0x00200000} {
+			set fin [open $fullpath rb]
+			set data [read $fin]
+			set crc [zlib crc32 $data]
+			set cdata [zlib deflate $data]
+			if {[string length $cdata] < $size} {
+				set method 8
+				set data $cdata
+			}
+			close $fin
+			set csize [string length $data]
+			puts -nonewline $zipchan $data
+		} else {
+			set method 8
+			set fin [open $fullpath rb]
+			set zlib [zlib stream deflate]
+			while {![eof $fin]} {
+				set data [read $fin 4096]
+				set crc [zlib crc32 $data $crc]
+				$zlib put $data
+				if {[string length [set zdata [$zlib get]]]} {
+					incr csize [string length $zdata]
+					puts -nonewline $zipchan $zdata
+				}
+			}
+			close $fin
+			$zlib finalize
+			set zdata [$zlib get]
+			incr csize [string length $zdata]
+			puts -nonewline $zipchan $zdata
+			$zlib close
+		}
+
+		if {$seekable} {
+			# update the header if the output is seekable
+			set local [binary format a4sssiiii PK\03\04 \
+					$version $flags $method $mtime $crc $csize $size]
+			set current [tell $zipchan]
+			seek $zipchan $offset
+			puts -nonewline $zipchan $local
+			seek $zipchan $current
+		} else {
+			# Write a data descriptor record
+			set ddesc [binary format a4iii PK\7\8 $crc $csize $size]
+			puts -nonewline $zipchan $ddesc
+		}
+	}
+
+	set hdr [binary format a4ssssiiiisssssii PK\01\02 0x0317 \
+			$version $flags $method $mtime $crc $csize $size \
+			[string length $utfpath] [string length $extra]\
+			[string length $utfcomment] 0 $attr $attrex $offset]
+	append hdr $utfpath $extra $utfcomment
+	return $hdr
+}
+
+#>>>
+# zip::mkzip {filename args} <<<
+#
+#        Create a zip archive in 'filename'. If a file already exists it will be
+#        overwritten by a new file. If '-directory' is used, the new zip archive
+#        will be rooted in the provided directory.
+#        -runtime can be used to specify a prefix file. For instance, 
+#        zip myzip -runtime unzipsfx.exe -directory subdir
+#        will create a self-extracting zip archive from the subdir/ folder.
+#        The -comment parameter specifies an optional comment for the archive.
+#
+#        eg: zip my.zip -directory Subdir -runtime unzipsfx.exe *.txt
+# 
+proc zip::mkzip {filename args} {
+	try {
+		set chan	[open $filename wb]
+		zip::mkzipchan $chan {*}$args
+	} finally {
+		if {[info exists chan] && $chan in [chan names]} {
+			close $chan
+		}
+	}
+}
+
+#>>>
+proc zip::mkzipchan {zf args} { #<<<
+	array set opts {
+		-zipkit 0 -runtime "" -comment "" -directory ""
+		-exclude {CVS/* */CVS/* *~ ".#*" "*/.#*"}
+	}
+
+	while {[string match -* [set option [lindex $args 0]]]} {
+		switch -exact -- $option {
+			-zipkit  { set opts(-zipkit) 1 }
+			-comment { set opts(-comment) [encoding convertto utf-8 [pop args 1]] }
+			-runtime { set opts(-runtime) [pop args 1] }
+			-directory {set opts(-directory) [file normalize [pop args 1]] }
+			-exclude {set opts(-exclude) [pop args 1] }
+			-- { pop args ; break }
+			default {
+				break
+			}
+		}
+		pop args
+	}
+
+	if {$opts(-runtime) ne ""} {
+		set rt [open $opts(-runtime) rb]
+		fcopy $rt $zf
+		close $rt
+	} elseif {$opts(-zipkit)} {
+		set zkd "#!/usr/bin/env tclkit\n\# This is a zip-based Tcl Module\n"
+		append zkd "package require vfs::zip\n"
+		append zkd "vfs::zip::Mount \[info script\] \[info script\]\n"
+		append zkd "if {\[file exists \[file join \[info script\] main.tcl\]\]} {\n"
+		append zkd "    source \[file join \[info script\] main.tcl\]\n"
+		append zkd "}\n"
+		append zkd \x1A
+		puts -nonewline $zf $zkd
+	}
+
+	set count 0
+	set cd ""
+
+	if {$opts(-directory) ne ""} {
+		set paths [walk $opts(-directory) $opts(-exclude)]
+	} else {
+		set paths [glob -nocomplain {*}$args]
+	}
+	foreach path $paths {
+		puts $path
+		append cd [mkzipfile $zf $opts(-directory) $path]
+		incr count
+	}
+	set cdoffset [tell $zf]
+	set endrec [binary format a4ssssiis PK\05\06 0 0 \
+			$count $count [string length $cd] $cdoffset\
+			[string length $opts(-comment)]]
+	append endrec $opts(-comment)
+	puts -nonewline $zf $cd
+	puts -nonewline $zf $endrec
+
+	return
+}
+
+#>>>
+
+# Modifications below Copyright (c) 2010 Cyan Ogilvie, licensed BSD
+proc zip::mkzipdata {args} { #<<<
+	#package require Memchan
+	#set chan	[memchan]
+	set chan	[file tempfile]
+	try {
+		chan configure $chan -translation binary -encoding binary
+		zip::mkzipchan $chan {*}$args
+		chan seek $chan 0
+		chan read $chan
+	} finally {
+		if {[info exists chan] && $chan in [chan names]} {
+			chan close $chan
+		}
+	}
+}
+
+#>>>
+
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-deb-0.3.tm {F 7247 104499} sugar-0.1.tm {F 20898 26677} cflib-1.13.0.tm {F 48052 74729} sop-1.5.1.tm {F 22523 97252} dsl-0.4.tm {F 1808 115021} rpm-0.2.tm {F 5779 5779} zip-1.2.1.tm {F 8714 113213}tcl {D 197 197}tm {D 15 15} pkg {D 13 115246} main.tcl {F 1120 172610}trofs01   7
+deb-0.3.tm {F 7247 66969} sugar-0.1.tm {F 20898 29612} sop-1.5.1.tm {F 22523 52135} dsl-0.4.tm {F 1808 59722} cflib-1.13.0.tm {F 48052 115021} zip-1.2.1.tm {F 8714 8714} rpm-0.2.tm {F 5779 57914}tcl {D 195 195}tm {D 15 15} pkg {D 13 115244} main.tcl {F 1120 172602}trofs01   7

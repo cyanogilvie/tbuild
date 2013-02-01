@@ -1390,7 +1390,7 @@ source [file join [apply {
 					files {cx filelist} { #<<<
 						set resolvedfiles	{}
 						foreach pattern $filelist {
-							foreach file [glob -nocomplain -type file $pattern] {
+							foreach file [glob -nocomplain -type f $pattern] {
 								set fqfn	[fullynormalize $file]
 								if {$fqfn ni $resolvedfiles} {
 									lappend resolvedfiles $fqfn
@@ -1485,7 +1485,7 @@ source [file join [apply {
 					files {cx filelist} { #<<<
 						set resolvedfiles	{}
 						foreach pattern $filelist {
-							foreach file [glob -nocomplain -type file $pattern] {
+							foreach file [glob -nocomplain -type f $pattern] {
 								set fqfn	[fullynormalize $file]
 								if {$fqfn ni $resolvedfiles} {
 									#lappend resolvedfiles $fqfn
