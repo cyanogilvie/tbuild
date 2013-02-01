@@ -1,5 +1,5 @@
 application "tbuild" {
-	version 0.4
+	version 0.5
 
 	runtime cfkit8.6
 
@@ -11,8 +11,6 @@ application "tbuild" {
 		platform
 		{rpm 0.2}
 		{deb 0.3}
-		rozfs
-		rozfsutils
 		sop
 		zip
 	}
