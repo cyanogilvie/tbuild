@@ -168,7 +168,7 @@ oo::objdefine actions {
 
 		set tm_data	""
 
-		append tm_data	[list package provide $name $version] "\n"
+		#append tm_data	[list package provide $name $version] "\n"
 
 		if {[info exists requires]} {
 			foreach req $requires {
@@ -2018,6 +2018,7 @@ source [file join [apply {
 			variable platform	[list [dict get $::tbuildconf default_platform]]
 			variable runtime	[list [dict get $::tbuildconf default_runtime]]
 			variable runprefix	{}
+			variable interactive	1
 		}]]
 		set args	[$cfg rest]
 		set platform	[$cfg get platform]
@@ -2027,7 +2028,7 @@ source [file join [apply {
 				runtime_path \
 				runtime_info
 		set fp	[file tempfile launcherfn]
-		chan puts $fp [string map [list %p% [list $platform] %b% [file normalize ~]] {
+		chan puts $fp [string map [list %i% [$cfg get interactive] %p% [list $platform] %b% [file normalize ~]] {
 package require platform
 
 foreach pattern [platform::patterns %p%] {
@@ -2050,8 +2051,11 @@ if {$app ne ""} {
 	while {1} {
 		apply {
 			{} {
-				puts -nonewline "> "; flush stdout
+				if {%i%} {
+					puts -nonewline "> "; flush stdout
+				}
 				set cmd	[chan gets stdin]
+				if {[chan eof stdin]} {exit}
 				try {
 					uplevel #0 $cmd
 				} on error {errmsg options} {
