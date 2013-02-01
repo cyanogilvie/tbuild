@@ -11,13 +11,13 @@ if {![file exists $main]} {
 }
 source $main
 
-if {[catch {
-	package require starkit
-}]} {
-	set have_starkit	0
-} else {
-	set have_starkit	1
-}
+#if {[catch {
+#	package require starkit
+#}]} {
+#	set have_starkit	0
+#} else {
+#	set have_starkit	1
+#}
 package require platform
 
 apply {
@@ -36,219 +36,4112 @@ apply {
 	}
 }
 
-if {$have_starkit && [starkit::startup] eq "sourced"} return
+#puts stderr "have_starkit: ($have_starkit)"
+#if {$have_starkit} {
+#	puts stderr "starkit::startup: [starkit::startup]"
+#}
+#if {$have_starkit && [starkit::startup] eq "sourced"} return
 
 try {
 	package require app-[apply {{argv} {return tbuild}} $argv]
 } on error {errmsg options} {
 	puts stderr "$errmsg\n[dict get $options -errorinfo]"
+	#puts stderr "auto_path:\n\t[join $::auto_path \n\t]"
+	#puts stderr "tm path:\n\t[join [tcl::tm::path list] \n\t]"
+} on ok {} {
+	if {[info exists ::tbuild::app_res]} {
+		return -options $::tbuild::app_options $::tbuild::app_res
+	}
 }
-package provide rpm 0.1
-package require cflib 1.2
-#!/usr/bin/env cfkit8.6
+package ifneeded app-tbuild 0.5 [list source [file join $dir _init.tcl]]
+					package provide app-tbuild 0.5
 
-package require cflib 1.2
+						try {
+							source [file join [file dirname [info script]] tbuild.tcl]
+						} on ok {res options} {
+							namespace eval ::tbuild [list variable app_res $res]
+							namespace eval ::tbuild [list variable app_options $options]
+						}
+					#!/usr/bin/env cfkit8.6
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
-namespace eval rpm {
-	proc run {args} { #<<<
-		set cmd	$args
-		try {
-			lassign [chan pipe] readpipe writepipe
-			lappend cmd >@ $writepipe
-			set handle	[open |$cmd w]
-			chan close $writepipe
-			chan configure $handle \
-					-blocking 0 \
-					-translation binary \
-					-encoding binary
-			chan configure $handle -blocking 1
-			chan close $handle
-		} trap {CHILDSTATUS} {errmsg options} {
-			set exitstatus	[lindex [dict get $options -errorcode] 2]
-			throw [list CHILDSTATUS $exitstatus] $errmsg
-		} on ok {} {
-			set output	[chan read $readpipe]
-			return $output
-		} finally {
-			if {[info exists readpipe]} {
-				if {$readpipe in [chan names]} {
-					chan close $readpipe
-				}
-				unset readpipe
-			}
+if {[file system [info script]] eq "native"} {
+	package require platform
+
+	foreach platform [platform::patterns [platform::identify]] {
+		set tm_path		[file join $env(HOME) .tbuild repo tm $platform]
+		set pkg_path	[file join $env(HOME) .tbuild repo pkg $platform]
+		if {[file exists $tm_path]} {
+			tcl::tm::path add $tm_path
+		}
+		if {[file exists $pkg_path]} {
+			lappend auto_path $pkg_path
 		}
 	}
-
-	#>>>
-	proc rpm {args} { #<<<
-		string trim [run rpm {*}$args]
-	}
-
-	#>>>
-	proc rpmbuild {args} { #<<<
-		string trim [run rpmbuild {*}$args]
-	}
-
-	#>>>
-	proc build_spec {spec files} { #<<<
-		set specdata	""
-		append specdata	[subst -novariables -nobackslashes {Name:		[dict get $spec name]
-Version:	[dict get $spec version]
-Release:	[dict get $spec release]
-Source:		[dict get $spec sourcetar]
-License:	[dict get $spec license]
-Vendor:		[dict get $spec vendor]
-Group:		[dict get $spec group]
-BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-buildroot
-}]
-		if {[llength [dict get $spec requires]] > 0} {
-			append specdata	[subst -novariables -nobackslashes {Requires:	[join [dict get $spec requires] ", "]
-}]
-		}
-		append specdata [subst -novariables -nobackslashes {Summary:	[dict get $spec summary]
-
-%description
-[dict get $spec description]
-
-# We need to redefine __os_install_post to prevent it stripping the binaries,
-# which breaks for us because it distrupts the appended metakit databases
-%define __os_install_post   /usr/lib/rpm/brp-compress; echo "Not stripping"
-
-%prep
-%setup -q
-
-%build
-
-%install
-rm -rf $RPM_BUILD_ROOT
-}]
-		dict for {src dst} $files {
-			if {[file executable $src]} {
-				set mode	"0755"
-			} else {
-				set mode	"0644"
-			}
-			append specdata [subst -novariables -nobackslashes {install -d "$RPM_BUILD_ROOT/[string trimleft [file dirname $dst] /]"
-install --mode [set mode] "[set src]" "$RPM_BUILD_ROOT/[string trimleft [set dst] /]"
-}]
-		}	
-		append specdata [subst -novariables -nobackslashes {
-%clean
-rm -rf $RPM_BUILD_ROOT
-
-%post
-[dict get $spec post_scriptlet]
-
-%preun
-[dict get $spec preun_scriptlet]
-
-%files
-}]
-		dict for {src dst} $files {
-			append specdata $dst "\n"
-		}
-
-		return $specdata
-	}
-
-	#>>>
-	proc make_rpm {spec files {target ""}} { #<<<
-		try {
-			set sourcedir	[rpm --eval %_sourcedir]
-			set specdir		[rpm --eval %_specdir]
-			set rpmout		"rpmout"
-
-			set specfile	[file join $specdir testspec.spec]
-			set sourcetar	[file join $sourcedir [dict get $spec sourcetar]]
-
-			set specdata	[build_spec $spec $files]
-
-			set fp	[open $specfile w]
-			puts $fp $specdata
-			close $fp
-
-			set here	[pwd]
-			cflib::in_tmp_dir {
-				set tarbase	[dict get $spec name]-[dict get $spec version]
-				file mkdir $tarbase
-
-				dict for {src dst} $files {
-					if {[string index $src 0] eq "/"} {
-						set fqsrc	$src
-						set src	[string range $src 1 end]
-					} else {
-						set fqsrc	[file join $here $src]
-					}
-					set prefix	[file dirname $src]
-					set dstdir	[file join $tarbase $prefix]
-					if {![file exists $dstdir]} {
-						file mkdir $dstdir
-					}
-					set dsttail	[file tail $src]
-					try {
-						file copy -- $fqsrc [file join $dstdir $dsttail]
-					} on error {errmsg options} {
-						puts stderr "Error copying file: $errmsg"
-						return -options $options $errmsg
-					}
-				}
-				run tar cvzf $sourcetar $tarbase
-			}
-
-			if {[info exists target] && $target ne ""} {
-				set buildoutput	[rpmbuild --target $target -bb $specfile 2> /dev/null]
-			} else {
-				set buildoutput	[rpmbuild -bb $specfile 2> /dev/null]
-			}
-			foreach line [split $buildoutput \n] {
-				if {[string match "Wrote: *" $line]} {
-					if {![regexp {^Wrote:\s+(.*)$} $line -> fn]} {
-						puts stderr "Couldn't parse output filename from \"$line\""
-						continue
-					}
-					if {![file exists $rpmout]} {
-						file mkdir $rpmout
-					}
-					file copy -force -- $fn $rpmout
-					puts "Wrote [file join $rpmout [file tail $fn]]"
-					file delete -- $fn
-				}
-			}
-		} finally {
-			if {[info exists specfile] && [file exists $specfile]} {
-				file delete -- $specfile
-			}
-			if {[info exists sourcetar] && [file exists $sourcetar]} {
-				file delete -- $sourcetar
-			}
-		}
-	}
-
-	#>>>
 }
 
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-package provide cflib 1.2
+
+set dir	[pwd]
+
+package require cflib
+package require platform
+
+namespace path {::cflib}
+
+proc fail {msg} { #<<<
+	puts stderr $msg
+	exit 1
+}
+
+#>>>
+proc getkey {dict key args} { #<<<
+	if {[llength $args] > 1} {
+		throw {syntax} "Too many arguments, expecting dict key ?default?"
+	}
+	if {[dict exists $dict $key]} {
+		return [dict get $dict $key]
+	}
+	if {[llength $args] == 1} {
+		return [lindex $args 0]
+	}
+	set choices	[join [dict keys $dict] "\", \""]
+	throw [list invalid_key $key] "Invalid key: \"$key\", choose from \"$choices\""
+}
+
+#>>>
+proc decomment {in} { #<<<
+	set out	""
+
+	foreach line [split $in \n] {
+		if {[string index [string trim $line] 0] eq "#"} continue
+		append out	$line "\n"
+	}
+
+	return $out
+}
+
+#>>>
+proc dsl_eval {interp dsl_commands dsl_script args} { #<<<
+	set aliases_old	{}
+	foreach {cmdname cmdargs cmdbody} [decomment $dsl_commands] {
+		dict set aliases_old $cmdname [$interp alias $cmdname]
+
+		$interp alias $cmdname apply [list $cmdargs $cmdbody] {*}$args
+	}
+
+	try {
+		$interp eval $dsl_script
+	} finally {
+		dict for {cmdname oldalias} $aliases_old {
+			$interp alias $cmdname $oldalias
+		}
+	}
+}
+
+#>>>
+
+# Build tbuildconf <<<
+set tbuildconf [dict create \
+	projfile			tbuild.proj \
+	tm_build			tm \
+	app_build			app \
+	repo_base			[file join $::env(HOME) .tbuild repo] \
+	default_runtime		cfkit8.6 \
+	default_platform	[platform::identify] \
+	debug				0 \
+	debupload {
+		{debfile} {
+			puts stderr "No upload script specified"
+		}
+	} \
+	rpmupload {
+		{rpmfile} {
+			puts stderr "No upload script specified"
+		}
+	} \
+]
+foreach file [list \
+		[file join / etc tbuild.conf] \
+		[file join $env(HOME) .tbuild config] \
+		[file join $dir .tbuild config] \
+] {
+	if {[file exists $file] && [file readable $file]} {
+		set tbuildconf	[dict merge $tbuildconf [decomment [readfile $file]]]
+	}
+}
+# Build tbuildconf >>>
+
+if {[dict get $tbuildconf debug]} {
+	proc ?? {script} {uplevel 1 $script}
+} else {
+	proc ?? {args} {}
+}
+
+oo::object create actions
+oo::objdefine actions {
+	method init {} {
+		namespace path {::cflib}
+	}
+
+	method build {{name "all"} args} { #<<<
+		global projinfo
+		my _load_projfile
+
+		if {$name eq "all"} {
+			set targets {}
+
+			foreach {category target} [my _targets] {
+				my build $target {*}$args
+			}
+			return
+		}
+
+		set istm	[dict exists $projinfo tms $name]
+		set ispkg	[dict exists $projinfo pkgs $name]
+		set isapp	[dict exists $projinfo applications $name]
+
+		if {!($istm || $ispkg || $isapp)} {
+			fail "Target \"$name\" is not a tm, package or application"
+		}
+
+		if {$istm} {
+			my build_tm $name {*}$args
+		}
+		
+		if {$ispkg} {
+			puts "would build pkg \"$name\""
+		}
+
+		if {$isapp} {
+			try {
+				my build_application $name {*}$args
+			} on error {errmsg options} {
+				puts stderr "Uncaught error building application \"$name\": [dict get $errorinfo]"
+				exit 3
+			}
+		}
+	}
+
+	#>>>
+	method build_tm {name args} { #<<<
+		global projinfo
+		my _load_projfile
+
+		dict with projinfo tms $name {}
+
+		set tm_data	""
+
+		#append tm_data	[list package provide $name $version] "\n"
+
+		if {[info exists requires]} {
+			foreach req $requires {
+				append tm_data [list package require {*}$req] "\n"
+			}
+		}
+
+		if {[info exists init]} {
+			append tm_data $init "\n"
+		}
+
+		foreach file $files {
+			set file_data	[readfile $file]
+			append tm_data $file_data
+			if {[string index $file_data end] ne "\n"} {
+				append tm_data "\n"
+			}
+		}
+
+		set out_fn_base	[dict get $::tbuildconf tm_build]
+
+		set target_platforms	[dict keys $platforms]
+		if {[llength $target_platforms] == 0} {
+			fail "No platforms specified"
+		}
+
+		foreach platform $target_platforms {
+			set tm_name		${name}-$version.tm
+			set out_fn_dir	[file dirname [file join $out_fn_base $platform $tm_name]]
+			set out_fn	[file join $out_fn_dir [file tail ${name}-$version.tm]]
+
+			if {![file exists $out_fn_dir]} {
+				file mkdir $out_fn_dir
+			}
+			if {"-compress" in $args} {
+				set oldsize	[string length $tm_data]
+				set compressed [zlib deflate [encoding convertto utf-8 [string map [list "\u001a" "\\u001a"] $tm_data]] 3]
+				set tm_data	"eval \[encoding convertfrom utf-8 \[zlib inflate [list $compressed]\]\]"
+				set newsize	[string length $tm_data]
+				puts "Compressed $tm_name $oldsize -> $newsize"
+			}
+			writefile $out_fn $tm_data
+			puts "Wrote \"$out_fn\""
+		}
+	}
+
+	#>>>
+	method build_application {name args} { #<<<
+		global projinfo
+		my _load_projfile
+
+		set appsettings	[dict get $projinfo applications $name]
+
+		puts stderr "building for \"$name\" platforms [dict keys [dict get $appsettings platforms]]"
+		dict for {platform platformsettings} [dict get $appsettings platforms] {
+			set before	[pwd]
+			my _in_tmp_dir {
+				try {
+					file mkdir $name.vfs
+
+					# main.tcl <<<
+					set tokens	[dict create]
+					if {[dict exists $appsettings choose_package]} {
+						dict set tokens %choose_package% \
+								[list [dict get $appsettings choose_package]]
+					} else {
+						dict set tokens %choose_package% [list [list return $name]]
+					}
+
+					set main.tcl_data [string map $tokens {
+#if {[catch {
+#	package require starkit
+#}]} {
+#	set have_starkit	0
+#} else {
+#	set have_starkit	1
+#}
+package require platform
+
+apply {
+	{} {
+		set here	[file dirname [info script]]
+		foreach platform [platform::patterns [platform::identify]] {
+			set pkgpath	[file join $here pkg $platform]
+			set tmpath	[file join $here tm $platform]
+			if {[file exists $pkgpath] && [file isdirectory $pkgpath]} {
+				lappend ::auto_path $pkgpath
+			}
+			if {[file exists $tmpath] && [file isdirectory $tmpath]} {
+				::tcl::tm::path add $tmpath
+			}
+		}
+	}
+}
+
+#puts stderr "have_starkit: ($have_starkit)"
+#if {$have_starkit} {
+#	puts stderr "starkit::startup: [starkit::startup]"
+#}
+#if {$have_starkit && [starkit::startup] eq "sourced"} return
+
+try {
+	package require app-[apply {{argv} %choose_package%} $argv]
+} on error {errmsg options} {
+	puts stderr "$errmsg\n[dict get $options -errorinfo]"
+	#puts stderr "auto_path:\n\t[join $::auto_path \n\t]"
+	#puts stderr "tm path:\n\t[join [tcl::tm::path list] \n\t]"
+} on ok {} {
+	if {[info exists ::tbuild::app_res]} {
+		return -options $::tbuild::app_options $::tbuild::app_res
+	}
+}
+}]
+
+					writefile [file join $name.vfs main.tcl] [set main.tcl_data]
+					# main.tcl >>>
+
+					set app_base	[file join $name.vfs pkg tcl app-$name]
+					file mkdir $app_base
+
+					# _init.tcl <<<
+					if {[dict exists $appsettings entrypoint]} {
+						set entrypoint	[dict get $appsettings entrypoint]
+					} else {
+						set entrypoint	[lindex [dict get $appsettings files] 0]
+					}
+					if {$entrypoint ni [dict get $appsettings files]} {
+						error "Invalid file specified as entrypoint: \"$entrypoint\""
+					}
+
+					set _init.tcl_data		{}
+					set include_packages	{}
+					foreach req [dict get $appsettings requires] {
+						#lappend _init.tcl_data	[list package require {*}$req]
+						lappend include_packages $req
+					}
+					if {[dict exists $platformsettings requires]} {
+						foreach req [dict get $platformsettings requires] {
+							puts stderr "Adding specific platform require: ($req) for $platform"
+							#lappend _init.tcl_data	[list package require {*}$req]
+							lappend include_packages $req
+						}
+					}
+					lappend _init.tcl_data [list package provide app-$name [dict get $appsettings version]]
+					lappend _init.tcl_data [format {
+						try {
+							source [file join [file dirname [info script]] %s]
+						} on ok {res options} {
+							namespace eval ::tbuild [list variable app_res $res]
+							namespace eval ::tbuild [list variable app_options $options]
+						}
+					} [list $entrypoint]]
+
+					writefile [file join $app_base _init.tcl] \
+							[join [set _init.tcl_data] "\n"]
+					# _init.tcl >>>
+
+					# app pkgIndex.tcl <<<
+					set pkgIndex.tcl_data	[string map [dict create \
+							%name%		[list app-$name] \
+							%version%	[list [dict get $appsettings version]] \
+					] {package ifneeded %name% %version% [list source [file join $dir _init.tcl]]
+					}]
+
+					writefile [file join $app_base pkgIndex.tcl] [set pkgIndex.tcl_data]
+					# app pkgIndex.tcl >>>
+
+					# Copy specified application files <<<
+					foreach file [dict get $appsettings files] {
+						set src_fn	[file join $before $file]
+						if {![file exists $src_fn]} {
+							error "Specified file doesn't exist: \"$file\""
+						}
+						if {![file readable $src_fn]} {
+							error "Specified file isn't readable: \"$file\""
+						}
+						set parts	[file split $file]
+						if {[lindex $parts 0] eq "/"} {
+							error "Absolute paths not allowed for files: \"$file\""
+						}
+						if {".." in $parts} {
+							error "Cannot have \"..\" in file specification: \"$file\""
+						}
+						set file_dest	[file join $app_base $file]
+						set file_dir	[file dirname $file_dest]
+						if {![file exists $file_dir]} {
+							file mkdir $file_dir
+						}
+						?? {puts "reading \"$src_fn\""}
+						set file_contents	[readfile $src_fn binary]
+						writefile $file_dest $file_contents binary
+					}
+					# Copy specified application files >>>
+
+					if {[dict exists $appsettings runtime]} {
+						set runtime		[dict get $appsettings runtime]
+					} else {
+						set runtime		[dict get $::tbuildconf default_runtime]
+					}
+
+					if {$platform eq "tcl"} {
+						set runtime_platform	[dict get $::tbuildconf default_platform]
+					} else {
+						set runtime_platform	$platform
+					}
+
+					lassign [my _select_runtime $runtime $runtime_platform] \
+							runtime_name \
+							runtime_version \
+							runtime_path \
+							runtime_info
+					set ::package_manifest [dict get $runtime_info builtin_packages]
+
+					set compatible_platforms	[platform::patterns $platform]
+					dict for {fn data} [my _resolve_packages $include_packages $compatible_platforms $name] {
+						puts stderr "transcribing file ($fn) [string length $data] bytes"
+						set fqfn	[file join $name.vfs $fn]
+						set dir		[file dirname $fqfn]
+						if {![file exists $dir]} {
+							file mkdir $dir
+						}
+						writefile $fqfn $data binary
+					}
+
+					unset ::package_manifest
+
+					set out_app_base	[file join $before [dict get $::tbuildconf app_build] $platform]
+					if {![file exists $out_app_base]} {
+						file mkdir $out_app_base
+					}
+					set app_name		[file join $out_app_base $name]
+					set app_name_static	[file join $out_app_base ${name}-static]
+					set fs		""
+					switch -- [dict get $appsettings fs] {
+						auto {
+							if {"trofs" in [dict get $runtime_info builtin_packages]} {
+								set fs	"trofs"
+							} elseif {"starkit" in [dict get $runtime_info builtin_packages]} {
+								set fs	"starkit"
+							} elseif {"rozfs" in [dict get $runtime_info builtin_packages]} {
+								set fs	"rozfs"
+							} else {
+								puts stderr "Need at least one of starkit, rozfs or trofs support in the runtime \"$runtime\""
+								exit 2
+							}
+						}
+
+						starkit {
+							if {"starkit" ni [dict get $runtime_info builtin_packages]} {
+								puts stderr "starkit requested, but selected runtime \"$runtime\" doesn't support it"
+								exit 2
+							}
+							set fs	"starkit"
+						}
+
+						rozfs {
+							if {"rozfs" ni [dict get $runtime_info builtin_packages]} {
+								puts stderr "rozfs requested, but selected runtime \"$runtime\" doesn't support it"
+								exit 2
+							}
+							set fs	"rozfs"
+						}
+
+						trofs {
+							if {"trofs" ni [dict get $runtime_info builtin_packages]} {
+								puts stderr "trofs requested, but selected runtime \"$runtime\" doesn't support it"
+								exit 2
+							}
+							set fs	"trofs"
+						}
+
+						zipfs_inline {
+							set fs	"zipfs_inline"
+						}
+
+						default {
+							puts stderr "Invalid fs requested: \"[dict get $appsettings fs]\""
+							exit 2
+						}
+					}
+					puts "Building app using filesystem: \"$fs\" ([dict get $appsettings fs])"
+					if {$fs eq "starkit"} {
+						puts "Writing application \"$app_name\""
+						exec -- sdx wrap $app_name -vfs $name.vfs -interp [file tail $runtime_path]
+						if {$platform ne "tcl"} {
+							puts "Writing application \"$app_name_static\""
+							exec -- sdx wrap $app_name_static -vfs $name.vfs -runtime $runtime_path
+						}
+					} elseif {$fs eq "rozfs"} {
+						package require rozfsutils
+
+						set header	""
+						append header	"#!/bin/sh\n"
+						append header	"# \\\n"
+						append header	[string map [list %r $runtime_name] {exec "%r" "$0" ${1+"$@"}}] "\n"
+						append header \
+{
+package require rozfs
+set top		[rozfs::mount [info script]]
+set main	[file join $top main.tcl]
+if {![file exists $main]} {
+	puts stderr "No main.tcl"
+	exit 1
+}
+source $main
+}
+						append header "\u001a"	;# ^Z
+
+						puts "Writing application \"$app_name\""
+						cflib::writefile $app_name $header
+						set h	[open $app_name a]
+						try {
+							chan configure $h -translation binary -encoding binary
+							chan seek $h 0 end
+							chan puts -nonewline $h [rozfsutils::serialize $name.vfs]
+						} finally {
+							chan close $h
+						}
+
+						if {$::tcl_platform(platform) eq "unix"} {
+							file attributes $app_name -permissions rwxr-xr-x
+						}
+
+						if {$platform ne "tcl"} {
+							# TODO: merge $name.vfs with boot trofs
+						}
+					} elseif {$fs eq "trofs"} {
+						package require trofs
+
+						set header	""
+						append header	"#!/bin/sh\n"
+						append header	"# \\\n"
+						append header	[string map [list %r $runtime_name] {exec "%r" "$0" ${1+"$@"}}] "\n"
+						append header \
+{
+package require trofs
+set top		[trofs::mount [info script]]
+set main	[file join $top main.tcl]
+if {![file exists $main]} {
+	puts stderr "No main.tcl"
+	exit 1
+}
+source $main
+}
+						puts "Writing application \"$app_name\""
+						cflib::writefile $app_name $header
+						trofs::archive $name.vfs $app_name
+
+						if {$::tcl_platform(platform) eq "unix"} {
+							file attributes $app_name -permissions rwxr-xr-x
+						}
+
+						if {$platform ne "tcl"} {
+							# TODO: merge $name.vfs with boot trofs
+						}
+					} elseif {$fs eq "zipfs_inline"} {
+						package require zip
+						set zipdata	[apply {
+							{basedir} {
+								set old	[pwd]
+								try {
+									cd $basedir
+									zip::mkzipdata -directory .
+								} finally {
+									cd $old
+								}
+							}
+						} $name.vfs]
+						set header	""
+						append header	"#!/bin/sh\n"
+						append header	"# \\\n"
+						append header	[string map [list %r $runtime_name] {exec "%r" "$0" ${1+"$@"}}] "\n"
+						append header	[format {
+package require stringchan
+package require vfs::zip 1.0.3.1
+source [file join [apply {
+	{} {
+		set mountpoint	zip://[incr ::_zipfs_inline_seq]
+		vfs::zip::MountChan [chan create read [stringchan new [binary decode base64 %s]]] $mountpoint -volume
+		set mountpoint
+	}
+}] main.tcl]
+} [binary encode base64 $zipdata]]
+						cflib::writefile $app_name $header binary
+					}
+				} on error {errmsg options} {
+					puts stderr "Uncaught error building \"$name\" for platform \"$platform\":\n[dict get $options -errorinfo]"
+				}
+			}
+		}
+	}
+
+	#>>>
+	method _select_runtime {runtime platform} { #<<<
+		set candidates	{}
+		foreach compatplat [platform::patterns $platform] {
+			set runtime_base	[file join [dict get $::tbuildconf repo_base] runtimes $compatplat]
+			foreach candidate [glob -nocomplain -type f [file join $runtime_base info *]] {
+				set info	[readfile $candidate]
+				set ext		[file extension $candidate]
+				switch -- $ext {
+					".exe"	{set candidate [file rootname $candidate]}
+					default	{set ext	""}
+				}
+				set simplename	[file tail $candidate]
+				if {[string match $runtime $simplename]} {
+					if {[dict get $info builtin_packages Tcl] eq ""} {
+						puts stderr "Corrupt version number for $runtime Tcl"
+						continue
+					}
+					lappend candidates [list \
+							[file tail $candidate] \
+							[dict get $info builtin_packages Tcl] \
+							[file join $runtime_base bin $simplename]$ext \
+							$info \
+					]
+				}
+			}
+		}
+
+		if {[llength $candidates] == 0} {
+			error "No suitable runtime found matching \"$runtime\" for platform \"$platform\""
+		}
+
+		lindex [lsort \
+				-index 1 \
+				-decreasing \
+				-command {package vcompare} \
+				$candidates] 0
+	}
+
+	#>>>
+	method _resolve_packages {required compatible_platforms name} { #<<<
+		set file_list	[dict create]
+		foreach req $required {
+			puts stderr "Resolving requirement: ($req)"
+			set rest	[lassign $req pkgname]
+			if {$pkgname eq "tbuild"} {
+				global projinfo
+				my _load_projfile
+
+				dict set file_list tm/tcl/tbuild-1.0.tm [string map [dict create \
+						%name%	[list $name] \
+						%version%	[list [dict get $projinfo applications $name version]] \
+				] {
+					namespace eval tbuild {
+						variable name		%name%
+						variable version	%version%
+					}
+				}]
+				continue
+			}
+			if {
+				[dict exists $::package_manifest $pkgname] &&
+				([llength $rest] == 0 ||
+				[package vsatisfies [dict get $::package_manifest $pkgname] {*}$rest])
+			} continue
+
+			set available	[my _find_compatible $req $compatible_platforms]
+			try {
+				if {[llength $available] == 0} {
+					throw {not_found} ""
+				}
+				foreach candidate $available {
+					lassign $candidate ver type path
+
+					if {$type eq "tm"} { #<<<
+						set sub_requires	[my _extract_tm_requires $path]
+						set sub_file_list	[my _resolve_packages $sub_requires $compatible_platforms $name]
+						set file_list	[dict merge \
+								$file_list \
+								$sub_file_list \
+						]
+						set path_rel	[my _strip_base $path]
+
+						?? {puts "slurping \"$pkgname\"\[$ver\] ($path) as ($path_rel)"}
+						dict set file_list $path_rel [readfile $path binary]
+						dict set ::package_manifest $pkgname $ver
+						throw {found} ""
+						#>>>
+					} elseif {$type eq "pkg"} { #<<<
+						foreach file [my _list_files_recursive $path] {
+							puts "Addling file ($file)"
+							set file_rel	[my _strip_base $file]
+							dict set file_list $file_rel [readfile $file binary]
+						}
+						dict set ::package_manifest $pkgname $ver
+						throw {found} ""
+						#>>>
+					} else { #<<<
+						error "Cannot deal with package type: \"$type\""
+						#>>>
+					}
+				}
+				throw {not_found} ""
+			} trap {found} {} {
+				continue
+			} trap {not_found} {} {
+				puts stderr "No suitable candidates found for requirement \"$req\""
+				error "No suitable candidates found for requirement \"$req\""
+			} on error {errmsg options} {
+				puts stderr "Unexpected error resolving dep ($req):\n[dict get $options -errorinfo]"
+				return -options $options $errmsg
+			}
+		}
+
+		return $file_list
+	}
+
+	#>>>
+	method _strip_base {path} { #<<<
+		set bases	[list [dict get $::tbuildconf repo_base] $::dir]
+		foreach base $bases {
+			set fqfn_base	[fullynormalize $base]
+			set fqfn_path	[fullynormalize $path]
+			set baselen	[string length $fqfn_base]
+			set prefix	[string range $fqfn_path 0 $baselen-1]
+			if {$prefix ne $fqfn_base} continue
+			return [string range $fqfn_path $baselen+1 end]
+		}
+		error "\"$path\" isn't contained in any of $bases"
+	}
+
+	#>>>
+	method _extract_tm_requires {path} { #<<<
+		set requires	{}
+		package require sugar
+		foreach cmdraw [sugar::scriptToList [readfile $path]] {
+			set cmd	{}
+			foreach token $cmdraw {
+				lassign $token type val
+
+				if {$type eq "TOK"} {
+					lappend cmd $val
+				}
+			}
+
+			if {[lrange $cmd 0 1] eq [list package require]} {
+				set rest	[lassign [lrange $cmd 2 end] name]
+				puts stderr "detected requirement for \"$name\" \"$rest\" from \"$path\""
+				lappend requires	[lrange $cmd 2 end]
+			}
+		}
+
+		return $requires
+	}
+
+	#>>>
+	method _list_files_recursive {base} { #<<<
+		# TODO: defend against circular links
+		set entries	{}
+
+		foreach ent [glob -type f -nocomplain [file join $base *]] {
+			lappend entries $ent
+		}
+
+		foreach ent [glob -type d -nocomplain [file join $base *]] {
+			lappend entries {*}[my _list_files_recursive $ent]
+		}
+
+		return $entries
+	}
+
+	#>>>
+	method _find_compatible {req compatible_platforms} { #<<<
+		set available	{}
+
+		set rest	[lassign $req pkgname]
+		set pkgpath	[string map [list :: /] $pkgname]
+		set tm_pkg		[file tail $pkgpath]
+		set tm_prefix	[file dirname $pkgpath]
+
+		set repo_base	[dict get $::tbuildconf repo_base]
+
+		# Look for tm
+		#puts "Looking for \"$req\" for platforms: [join $compatible_platforms ", "]"
+		foreach plat $compatible_platforms {
+			foreach loc [list $::dir $repo_base] {
+				if {$tm_prefix ne "."} {
+					set tm_path		[file join $loc tm $plat $tm_prefix]
+				} else {
+					set tm_path		[file join $loc tm $plat]
+				}
+				#puts "Looking for \"[file join $tm_path $tm_pkg-*.tm]\""
+				foreach match [glob -nocomplain -type f [file join $tm_path $tm_pkg-*.tm]] {
+					#puts "\tFound \"$match\""
+					if {![regexp {^([[:alpha:]][[:alnum:]_]*)-([[:digit:]].*)\.tm$} [file tail $match] -> name version]} continue
+					#puts "\t-> name: ($name) version: ($version)"
+					if {
+						[llength $rest] == 0 ||
+						[package vsatisfies $version {*}$rest]
+					} {
+						lappend available [list $version tm $match $loc]
+					}
+				}
+			}
+		}
+
+		# Look for package
+		foreach plat $compatible_platforms {
+			foreach loc [list $::dir $repo_base] {
+				set pkg_path		[file join $loc pkg $plat]
+				foreach pkgIndex [glob -nocomplain -type f [file join $pkg_path * pkgIndex.tcl]] {
+					?? {puts "Checking for $pkgname in $pkgIndex"}
+					package require sugar
+					foreach cmdraw [sugar::scriptToList [readfile $pkgIndex]] {
+						set cmd	{}
+						foreach token $cmdraw {
+							lassign $token type val
+							if {$type eq "TOK"} {
+								lappend cmd $val
+							}
+						}
+
+						if {[lrange $cmd 0 2] eq [list package ifneeded $pkgname]} {
+							set offered_version	[lindex $cmd 3]
+							?? {puts "found candidate: $offered_version"}
+							if {
+								[llength $rest] == 0 ||
+								[package vsatisfies $offered_version {*}$rest]
+							} {
+								lappend available	[list $offered_version pkg [file dirname $pkgIndex] $loc]
+							} else {
+								?? {puts "... doesn't satisfy requirement: $rest"}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		try {
+		lsort -unique -decreasing -command [list apply {
+			{a b} {
+				set aver	[lindex $a 0]
+				set bver	[lindex $b 0]
+				set sort	[package vcompare $aver $bver]
+				if {$sort == 0} {
+					# As a version tie-breaker, prefer tm over pkg
+					set atype	[lindex $a 1]
+					set btype	[lindex $b 1]
+					if {$atype eq $btype} {
+						# Prefer local to packages installed in the repo
+						set aloc	[expr {[lindex $a 3] eq $::dir}]
+						set bloc	[expr {[lindex $b 3] eq $::dir}]
+						if {$aloc == $bloc} {
+							return [string compare [lindex $a 2] [lindex $b 2]]
+						} elseif {$aloc} {
+							return 1
+						} else {
+							return -1
+						}
+					} elseif {$atype eq "tm" && $btype ne "tm"} {
+						return 1
+					} elseif {$atype ne "tm" && $btype eq "tm"} {
+						return -1
+					}
+				}
+				return $sort
+			}
+		}] $available
+		} on ok {res} {
+			?? {puts "returning:\n\t[join $res \n\t]"}
+			set res
+		}
+	}
+
+	#>>>
+	method _refresh_build {name} { #<<<
+		# TODO: determine if target $name needs to be rebuilt
+		my build $name
+	}
+
+	#>>>
+	method clean {} { #<<<
+	}
+
+	#>>>
+	method install {args} { #<<<
+		global projinfo
+		my _load_projfile
+
+		if {[llength $args] == 0 || "all" in $args} {
+			foreach {category target} [my _targets] {
+				my _install_$category $target
+			}
+			return
+		}
+
+		set allow_tm	1
+		set allow_pkg	1
+		set allow_app	1
+
+		foreach name $args {
+			if {[string index $name 0] eq "-"} {
+				switch -- $name {
+					-no_app	{set allow_app 0}
+					-no_tm	{set allow_tm 0}
+					-no_pkg	{set allow_pkg 0}
+					default {
+						puts stderr "Invalid switch \"$name\""
+					}
+				}
+				continue
+			}
+			if {$allow_tm} {
+				set istm	[dict exists $projinfo tms $name]
+			} else {
+				set istm	0
+			}
+			if {$allow_pkg} {
+				set ispkg	[dict exists $projinfo pkgs $name]
+			} else {
+				set ispkg	0
+			}
+			if {$allow_app} {
+				set isapp	[dict exists $projinfo applications $name]
+			} else {
+				set isapp	0
+			}
+
+			if {!($istm || $ispkg || $isapp)} {
+				fail "No target called \"$name\""
+			}
+
+			if {$istm} {my _install_tm $name}
+			if {$ispkg} {my _install_pkg $name}
+			if {$isapp} {my _install_app $name}
+		}
+	}
+
+	#>>>
+	method _install_tm {name} { #<<<
+		global projinfo
+
+		my _refresh_build $name
+		dict with projinfo tms $name {
+			set src_fn_base	[dict get $::tbuildconf tm_build]
+			set dst_fn_base	[file join [dict get $::tbuildconf repo_base] tm]
+
+			set target_platforms	[dict keys $platforms]
+			if {[llength $target_platforms] == 0} {
+				fail "No platforms specified"
+			}
+
+			foreach platform $target_platforms {
+				set tm_name	${name}-$version.tm
+				set src_fn	[file join \
+						$src_fn_base \
+						$platform \
+						$tm_name \
+				]
+				if {![file exists $src_fn]} {
+					puts stderr "WARNING: Expecting \"$src_fn\" but it wasn't built"
+					continue
+				}
+
+				set dst_fn_dir	[file dirname [file join $dst_fn_base $platform $tm_name]]
+				if {![file exists $dst_fn_dir]} {
+					file mkdir $dst_fn_dir
+				}
+
+				try {
+					file copy -force $src_fn $dst_fn_dir
+					puts "Installed tm $name in $dst_fn_dir"
+				} on error {errmsg options} {
+					fail "Error installing tm $name: $errmsg"
+				}
+			}
+		}
+	}
+
+	#>>>
+	method _install_pkg {name} { #<<<
+		global projinfo
+
+		dict with $projinfo 
+	}
+
+	#>>>
+	method _install_app {name} { #<<<
+		global projinfo
+
+		my _refresh_build $name
+		dict with projinfo applications $name {
+			set src_fn_base	[dict get $::tbuildconf app_build]
+			set dst_fn_base	[file join [dict get $::tbuildconf repo_base] apps]
+
+			set target_platforms	[dict keys $platforms]
+			if {[llength $target_platforms] == 0} {
+				fail "No platforms specified"
+			}
+
+			foreach platform $target_platforms {
+				set src_fn	[file join \
+						$src_fn_base \
+						$platform \
+						$name \
+				]
+				if {![file exists $src_fn]} {
+					puts stderr "WARNING: Expecting \"$src_fn\" but it wasn't built"
+					continue
+				}
+
+				if {[dict exists $platforms $platform install]} {
+					set dst_fn	[dict get $platforms $platform install]
+					if {[string index $dst_fn end] eq "/"} {
+						set dst_fn	[file join $dst_fn $name]
+					}
+				} else {
+					set dst_fn	[file join $dst_fn_base $platform $name]
+				}
+				set dst_fn_dir	[file dirname $dst_fn]
+
+				if {![file exists $dst_fn_dir]} {
+					file mkdir $dst_fn_dir
+				}
+
+				try {
+					file copy -force $src_fn $dst_fn
+					puts "Installed app $name as $dst_fn"
+				} on error {errmsg options} {
+					fail "Error installing tm $name: $errmsg"
+				}
+			}
+		}
+	}
+
+	#>>>
+	method rpm {args} { #<<<
+		package require rpm 0.2
+
+		global projinfo
+		my _load_projfile
+
+		if {![dict exists $projinfo rpms]} {
+			dict set projinfo rpms {}
+		}
+
+		set upload	0
+		if {$args eq {-upload}} {
+			set upload	1
+			set args	{}
+		}
+		if {[llength $args] == 0 || "all" in $args} {
+			set args	[dict keys [dict get $projinfo rpms]]
+		}
+
+		set built_apps	[dict create]
+		foreach name $args {
+			if {$name eq "-upload"} {
+				set upload	1
+				continue
+			}
+			set rpminfo	[dict get $projinfo rpms $name]
+			dict set rpminfo name $name
+			set runtimes	{}
+
+			dict for {appname installpath} [dict get $rpminfo appfiles] {
+				if {![dict exists $built_apps $appname]} {
+					puts "----- building app ($appname) -----"
+					my build_application $appname
+					dict set built_apps $appname 1
+				}
+				lappend runtimes	[dict get $projinfo applications $appname runtime]
+			}
+			set runtimes	[lsort -unique $runtimes]
+
+			if {![dict exists $rpminfo target] || [dict size [dict get $rpminfo target]] == 0} {
+				puts stderr "No targets defined for rpm \"$name\""
+				exit 1
+			}
+			dict for {rpmtarget platform} [dict get $rpminfo target] {
+				puts "building rpm \"$name\", rpmtarget: ($rpmtarget) platform: ($platform)"
+
+				if {![dict exists $rpminfo version]} {
+					error "Must define rpm version"
+				}
+				if {![dict exists $rpminfo summary]} {
+					error "Require summary to be defined to build an rpm"
+				}
+				if {![dict exists $rpminfo description]} {
+					error "Require description to be defined to build an rpm"
+				}
+				set reqs	[dict get $rpminfo requires]
+				foreach runtime $runtimes {
+					switch -glob -- $runtime {
+						"*cfkit*" {
+							lappend reqs	"cfkit"
+						}
+
+						"*kbskit*" {
+							lappend reqs	"kbskit"
+						}
+					}
+				}
+				dict set rpminfo requires [lsort -unique $reqs]
+
+				#if {[info exists rpm]} {unset rpm}
+				#array set rpm $rpminfo
+				#puts "rpm settings:"
+				#parray rpm
+				#unset rpm
+
+				set files	{}
+				#set out_app_base	[file join [dict get $::tbuildconf repo_base] apps $platform]
+				set out_app_base	[file join [dict get $::tbuildconf app_build] $platform]
+				dict for {appname installpath} [dict get $rpminfo appfiles] {
+					set app_src		[file join $out_app_base $appname]
+					lappend files	$app_src $installpath
+				}
+				if {[dict exists $rpminfo files]} {
+					foreach {pattern dst} [dict get $rpminfo files] {
+						foreach match [glob -nocomplain $pattern] {
+							if {[string index $dst end] eq "/"} {
+								lappend files	$match [file join $dst [file tail $match]]
+							} else {
+								lappend files	$match $dst
+							}
+						}
+					}
+					#lappend files {*}[dict get $rpminfo files]
+				}
+				puts "files:"
+				foreach {s d} $files {
+					puts "$s -> $d"
+				}
+				try {
+					set outfiles	[rpm::make_rpm $rpminfo $files $rpmtarget]
+				} on error {errmsg options} {
+					puts stderr "Error building rpm: $errmsg"
+					cflib::writefile /tmp/failed.spec [rpm::build_spec $rpminfo $files]
+					return -options $options $errmsg
+				} on ok {} {
+					if {$upload} {
+						my _rpmupload $outfiles
+					}
+				}
+			}
+		}
+	}
+
+	#>>>
+	method deb {args} { #<<<
+		package require deb 0.3
+
+		global projinfo
+		my _load_projfile
+
+		if {![dict exists $projinfo debs]} {
+			dict set projinfo debs {}
+		}
+
+		set upload	0
+		if {$args eq {-upload}} {
+			set upload	1
+			set args	{}
+		}
+		if {[llength $args] == 0 || "all" in $args} {
+			set args	[dict keys [dict get $projinfo debs]]
+		}
+
+		set ::deb::debug	1
+		set built_apps	[dict create]
+		foreach name $args {
+			if {$name eq "-upload"} {
+				set upload	1
+				continue
+			}
+			set debinfo	[dict get $projinfo debs $name]
+			set debsettings	[dict create]
+			dict set debinfo name $name
+			dict set debsettings %PACKAGE_NAME% $name
+			set runtimes	{}
+
+			if {[dict exists $debinfo postinst]} {
+				dict set debsettings %POSTINST% [dict get $debinfo postinst]
+			}
+
+			if {[dict exists $debinfo prerm]} {
+				dict set debsettings %PRERM% [dict get $debinfo prerm]
+			}
+
+			dict for {appname installpath} [dict get $debinfo appfiles] {
+				if {![dict exists $built_apps $appname]} {
+					puts "----- building app ($appname) -----"
+					my build_application $appname
+					dict set built_apps $appname 1
+				}
+				lappend runtimes	[dict get $projinfo applications $appname runtime]
+			}
+			set runtimes	[lsort -unique $runtimes]
+
+			if {![dict exists $debinfo target] || [dict size [dict get $debinfo target]] == 0} {
+				puts stderr "No targets defined for deb \"$name\""
+				exit 1
+			}
+			try {
+				string trim [exec dpkg --print-architecture]
+			} on ok {myarch} {}
+			dict for {debtarget platform} [dict get $debinfo target] {
+				if {$debtarget ne $myarch && $debtarget ne "all"} continue
+				puts "building deb \"$name\", debtarget: ($debtarget) platform: ($platform)"
+
+				if {![dict exists $debinfo version]} {
+					error "Must define deb version"
+				}
+				dict set debsettings %VERSION% [dict get $debinfo version]
+				if {[dict exists $debinfo revision]} {
+					dict set debsettings %REVISION% [dict get $debinfo revision]
+				}
+				if {![dict exists $debinfo summary]} {
+					error "Require summary to be defined to build an deb"
+				}
+				dict set debsettings %SUMMARY% [dict get $debinfo summary]
+				if {![dict exists $debinfo description]} {
+					error "Require description to be defined to build an deb"
+				}
+				dict set debsettings %DESCRIPTION% [dict get $debinfo description]
+				set reqs	[dict get $debinfo requires]
+				foreach runtime $runtimes {
+					switch -glob -- $runtime {
+						"*cfkit*" {
+							lappend reqs	"cfkit"
+						}
+
+						"*kbskit*" {
+							lappend reqs	"kbskit"
+						}
+					}
+				}
+				dict set debinfo requires [lsort -unique $reqs]
+				dict set debsettings %DEPENDS% [dict get $debinfo requires]
+
+				#if {[info exists deb]} {unset deb}
+				#array set deb $debinfo
+				#puts "deb settings:"
+				#parray deb
+				#unset deb
+
+				set files	{}
+				#set out_app_base	[file join [dict get $::tbuildconf repo_base] apps $platform]
+				set out_app_base	[file join [dict get $::tbuildconf app_build] $platform]
+				dict for {appname installpath} [dict get $debinfo appfiles] {
+					set app_src		[file join $out_app_base $appname]
+					lappend files	$app_src $installpath
+				}
+				if {[dict exists $debinfo files]} {
+					foreach {pattern dst} [dict get $debinfo files] {
+						foreach match [glob -nocomplain $pattern] {
+							if {[string index $dst end] eq "/"} {
+								lappend files	$match [file join $dst [file tail $match]]
+							} else {
+								lappend files	$match $dst
+							}
+						}
+					}
+					#lappend files {*}[dict get $debinfo files]
+				}
+				puts "files:"
+				set file_data	[dict create]
+				foreach {s d} [my _expand_files $files] {
+					puts "$s -> $d"
+					dict set file_data	$d perms [file attributes $s -permissions]
+					dict set file_data	$d data [cflib::readfile $s binary]
+				}
+				try {
+					deb::make_deb $debsettings $file_data
+				} on error {errmsg options} {
+					puts stderr "Error building deb: $errmsg"
+					return -options $options $errmsg
+				} on ok {deboutput} {
+					lassign $deboutput deb_fn deb_data
+					if {![file exists debout]} {
+						file mkdir debout
+					}
+					cflib::writefile [file join debout $deb_fn] $deb_data binary
+					puts "Wrote [file join debout $deb_fn]"
+					if {$upload} {
+						puts "Attempting to upload [file join debout $deb_fn]"
+						my _debupload [file join debout $deb_fn]
+					} else {
+						puts "Not uploading"
+					}
+				}
+			}
+		}
+	}
+
+	#>>>
+	method _expand_file {s d} { #<<<
+		set results	{}
+		if {[file type $s] eq "directory"} {
+			foreach child [glob -nocomplain [file join $s *]] {
+				set tail	[file tail $child]
+				lappend results {*}[my _expand_file $child [file join $d $tail]]
+			}
+		} else {
+			lappend results	$s $d
+		}
+		set results
+	}
+
+	#>>>
+	method _expand_files {files} { #<<<
+		set expanded_files	{}
+		foreach {s d} $files {
+			lappend expanded_files	{*}[my _expand_file $s $d]
+		}
+		set expanded_files
+	}
+
+	#>>>
+	method _rpmupload {fn} { #<<<
+		set script	[getkey $::tbuildconf rpmupload]
+		apply $script $fn
+	}
+
+	#>>>
+	method _debupload {fn} { #<<<
+		set script	[getkey $::tbuildconf debupload]
+		apply $script $fn
+	}
+
+	#>>>
+	method remove {} { #<<<
+	}
+
+	#>>>
+	method path {args} { #<<<
+		set paths		{}
+
+		# Apps
+		set basepath	[file join [dict get $::tbuildconf repo_base] apps]
+		foreach platform [platform::patterns [platform::identify]] {
+			# TODO: figure out how to quote spaces and other nasties
+			set path		[file join $basepath $platform]
+			if {"-all" in $args || [file isdirectory $path]} {
+				lappend paths	[file nativename $path]
+			}
+		}
+
+		# Runtimes
+		set basepath	[file join [dict get $::tbuildconf repo_base] runtimes]
+		foreach platform [platform::patterns [platform::identify]] {
+			# TODO: figure out how to quote spaces and other nasties
+			set path		[file join $basepath $platform bin]
+			if {"-all" in $args || [file isdirectory $path]} {
+				lappend paths	[file nativename $path]
+			}
+		}
+
+		puts [join $paths :]
+	}
+
+	#>>>
+	method _load_projfile {} { #<<<
+		global projinfo projinfo_loaded
+
+		if {[info exists projinfo_loaded]} return
+
+		set projfile	[getkey $::tbuildconf projfile]
+		set conffile	[file join $::dir $projfile]
+
+		if {![file exists $conffile]} {
+			fail "Cannot find config file $projfile"
+		}
+
+		if {![file readable $conffile]} {
+			fail "Cannot read config file $projfile"
+		}
+
+		set projinfo {
+			tms		{}
+			pkgs	{}
+		}
+
+		interp create -safe proj
+
+		# TODO: Not safe - provide filtered versions of these
+		#interp expose proj file
+		interp expose proj glob
+
+		dsl_eval proj {
+			tm {name script} { #<<<
+				global projinfo
+
+				dict set projinfo tms $name {
+					platforms	{}
+					build_commands	{}
+				}
+
+				dsl_eval proj {
+					version {cx ver} { #<<<
+						dict set ::projinfo {*}$cx version $ver
+					}
+
+					#>>>
+					summary {cx summary} { #<<<
+						dict set ::projinfo {*}$cx summary $summary
+					}
+
+					#>>>
+					description {cx desc} { #<<<
+						dict set ::projinfo {*}$cx description $desc
+					}
+
+					#>>>
+					requires {cx packagelist} { #<<<
+						dict set ::projinfo {*}$cx requires $packagelist
+					}
+
+					#>>>
+					init {cx script} { #<<<
+						dict set ::projinfo {*}$cx init $script
+					}
+
+					#>>>
+					files {cx filelist} { #<<<
+						set resolvedfiles	{}
+						foreach pattern $filelist {
+							foreach file [glob -nocomplain -type file $pattern] {
+								set fqfn	[fullynormalize $file]
+								if {$fqfn ni $resolvedfiles} {
+									lappend resolvedfiles $fqfn
+								}
+							}
+						}
+						dict set ::projinfo {*}$cx files $resolvedfiles
+					}
+
+					#>>>
+					cfiles {cx filelist} { #<<<
+						dict set ::projinfo {*}$cx cfiles $filelist
+					}
+
+					#>>>
+					platform {cx platname {platform_specific_config {}}} { #<<<
+						dict set ::projinfo {*}$cx platforms $platname [dict create]
+						dsl_eval proj {
+							requires {cx packagelist} { #<<<
+								dict set ::projinfo {*}$cx requires $packagelist
+							}
+
+							#>>>
+						} $platform_specific_config [concat $cx [list platforms $platname]]
+					}
+
+					#>>>
+					build {cx shellscript} { #<<<
+						set cmds	[dict get $::projinfo {*}$cx build_commands]
+						lappend cmds $shellscript
+						dict set ::projinfo {*}$cx build_commands $cmds
+						try {
+							exec /bin/sh -c $shellscript
+						} on error {errmsg} {
+							puts stderr "Error running buildscript: $errmsg\n$cmd"
+							exit 1
+						}
+					}
+					#>>>
+				} $script [list tms $name]
+			}
+
+			#>>>
+			application {name script} { #<<<
+				global projinfo
+
+				dict set projinfo applications $name {
+					platforms	{}
+					fs			{auto}
+				}
+
+				dsl_eval proj {
+					runtime {cx runtime} { #<<<
+						dict set ::projinfo {*}$cx runtime $runtime
+					}
+
+					#>>>
+					version {cx ver} { #<<<
+						dict set ::projinfo {*}$cx version $ver
+					}
+
+					#>>>
+					version_of {pkg} { #<<<
+						# TODO: find version of package $pkg
+					}
+
+					#>>>
+					summary {cx summary} { #<<<
+						dict set ::projinfo {*}$cx summary $summary
+					}
+
+					#>>>
+					description {cx desc} { #<<<
+						set trimmed	{}
+						foreach line [string trim [split $desc \n]] {
+							lappend trimmed	[string trim $line]
+						}
+						dict set ::projinfo {*}$cx description [join $trimmed \n]
+					}
+
+					#>>>
+					requires {cx packagelist} { #<<<
+						dict set ::projinfo {*}$cx requires $packagelist
+					}
+
+					#>>>
+					init {cx script} { #<<<
+						dict set ::projinfo {*}$cx init $script
+					}
+
+					#>>>
+					files {cx filelist} { #<<<
+						set resolvedfiles	{}
+						foreach pattern $filelist {
+							foreach file [glob -nocomplain -type file $pattern] {
+								set fqfn	[fullynormalize $file]
+								if {$fqfn ni $resolvedfiles} {
+									#lappend resolvedfiles $fqfn
+									lappend resolvedfiles $file
+								}
+							}
+						}
+						dict set ::projinfo {*}$cx files $resolvedfiles
+					}
+
+					#>>>
+					cfiles {cx filelist} { #<<<
+						dict set ::projinfo {*}$cx cfiles $filelist
+					}
+
+					#>>>
+					platform {cx platname {platform_specific_config {}}} { #<<<
+						dict set ::projinfo {*}$cx platforms $platname [dict create]
+						dsl_eval proj {
+							requires {cx packagelist} { #<<<
+								dict set ::projinfo {*}$cx requires $packagelist
+							}
+
+							#>>>
+							install {cx install_dest} { #<<<
+								dict set ::projinfo {*}$cx install $install_dest
+							}
+
+							#>>>
+						} $platform_specific_config [concat $cx [list platforms $platname]]
+					}
+
+					#>>>
+					choose_package {cx script} { #<<<
+						dict set ::projinfo {*}$cx choose_package $script
+					}
+
+					#>>>
+					fs {cx fs} { #<<<
+						dict set ::projinfo {*}$cx fs $fs
+					}
+
+					#>>>
+				} $script [list applications $name]
+			}
+
+			#>>>
+			pkg {name script} { #<<<
+				global projinfo
+
+				dict set projinfo pkgs $name {
+					platforms	{}
+				}
+
+				dsl_eval proj {
+					version {cx ver} { #<<<
+						dict set ::projinfo {*}$cx version $ver
+					}
+
+					#>>>
+					summary {cx summary} { #<<<
+						dict set ::projinfo {*}$cx summary $summary
+					}
+
+					#>>>
+					description {cx desc} { #<<<
+						dict set ::projinfo {*}$cx description $desc
+					}
+
+					#>>>
+					requires {cx packagelist} { #<<<
+						dict set ::projinfo {*}$cx requires $packagelist
+					}
+
+					#>>>
+					init {cx script} { #<<<
+						dict set ::projinfo {*}$cx init $script
+					}
+
+					#>>>
+					files {cx filelist} { #<<<
+						dict set ::projinfo {*}$cx files $filelist
+					}
+
+					#>>>
+					cfiles {cx filelist} { #<<<
+						dict set ::projinfo {*}$cx cfiles $filelist
+					}
+
+					#>>>
+					platform {cx platname {platform_specific_config {}}} { #<<<
+						dict set ::projinfo {*}$cx platforms $platname [dict create]
+						dsl_eval proj {
+							requires {cx packagelist} { #<<<
+								dict set ::projinfo {*}$cx requires $packagelist
+							}
+
+							#>>>
+						} $platform_specific_config [concat $cx [list platforms $platname]]
+					}
+
+					#>>>
+				} $script [list pkgs $name]
+			}
+
+			#>>>
+			this_platform {} { #<<<
+				return [platform::identify]
+			}
+
+			#>>>
+			rpm {name settings} { #<<<
+				dict set ::projinfo rpms $name {
+					target			{}
+					release			1
+					license			"commercial"
+					vendor			"Codeforge"
+					group			"Applications/System"
+					sourcetar		"tbuild_tmp_source.tar.gz"
+					requires		{}
+					post_scriptlet	""
+					preun_scriptlet	""
+					appfiles		{}
+				}
+				dsl_eval proj {
+					version {cx version} { #<<<
+						dict set ::projinfo {*}$cx version $version
+					}
+
+					#>>>
+					summary {cx summary} { #<<<
+						dict set ::projinfo {*}$cx summary $summary
+					}
+
+					#>>>
+					description {cx desc} { #<<<
+						set trimmed	{}
+						foreach line [split [string trim $desc] \n] {
+							lappend trimmed	[string trim $line]
+						}
+						dict set ::projinfo {*}$cx description [join $trimmed \n]
+					}
+
+					#>>>
+					target {cx target platform} { #<<<
+						dict set ::projinfo {*}$cx target $target $platform
+					}
+
+					#>>>
+					release {cx rel} { #<<<
+						dict set ::projinfo {*}$cx release $rel
+					}
+
+					#>>>
+					license {cx lic} { #<<<
+						dict set ::projinfo {*}$cx license $lic
+					}
+
+					#>>>
+					vendor {cx vendor} { #<<<
+						dict set ::projinfo {*}$cx vendor $vendor
+					}
+
+					#>>>
+					group {cx group} { #<<<
+						dict set ::projinfo {*}$cx group $group
+					}
+
+					#>>>
+					rpmrequires {cx req} { #<<<
+						dict set ::projinfo {*}$cx requires $req
+					}
+
+					#>>>
+					applications {cx applist} { #<<<
+						package require sugar
+						set appfiles	{}
+						foreach cmdraw [sugar::scriptToList $applist] {
+							set cmd	{}
+							foreach token $cmdraw {
+								lassign $token type val
+
+								if {$type eq "TOK"} {
+									lappend cmd $val
+								}
+							}
+
+							switch -- [llength $cmd] {
+								0 {continue}
+
+								1 {
+									lappend cmd	[file join / usr bin [lindex $cmd 0]]
+								}
+
+								2 {}
+
+								default {
+									error "Invalid syntax for rpm application list: ($cmd)"
+								}
+							}
+
+							lappend appfiles	{*}$cmd
+						}
+						dict set ::projinfo {*}$cx appfiles $appfiles
+					}
+
+					#>>>
+					post_scriptlet {cx scr} { #<<<
+						dict set ::projinfo {*}$cx post_scriptlet $scr
+					}
+
+					#>>>
+					preun_scriptlet {cx scr} { #<<<
+						dict set ::projinfo {*}$cx preun_scriptlet $scr
+					}
+
+					#>>>
+					files {cx files} { #<<<
+						dict set ::projinfo {*}$cx files $files
+					}
+
+					#>>>
+					include {cx fn} { #<<<
+						return [cflib::readfile $fn]
+					}
+
+					#>>>
+				} $settings [list rpms $name]
+			}
+
+			#>>>
+			deb {name settings} { #<<<
+				dict set ::projinfo debs $name {
+					target			{}
+					release			1
+					license			"commercial"
+					vendor			"Codeforge"
+					section			"utils"
+					sourcetar		"tbuild_tmp_source.tar.gz"
+					requires		{}
+					post_scriptlet	""
+					preun_scriptlet	""
+					appfiles		{}
+				}
+				dsl_eval proj {
+					version {cx version} { #<<<
+						dict set ::projinfo {*}$cx version $version
+					}
+
+					#>>>
+					summary {cx summary} { #<<<
+						dict set ::projinfo {*}$cx summary $summary
+					}
+
+					#>>>
+					description {cx desc} { #<<<
+						set trimmed	{}
+						foreach line [split [string trim $desc] \n] {
+							lappend trimmed	[string trim $line]
+						}
+						dict set ::projinfo {*}$cx description [join $trimmed \n]
+					}
+
+					#>>>
+					target {cx target platform} { #<<<
+						dict set ::projinfo {*}$cx target $target $platform
+					}
+
+					#>>>
+					release {cx rel} { #<<<
+						dict set ::projinfo {*}$cx release $rel
+					}
+
+					#>>>
+					license {cx lic} { #<<<
+						dict set ::projinfo {*}$cx license $lic
+					}
+
+					#>>>
+					vendor {cx vendor} { #<<<
+						dict set ::projinfo {*}$cx vendor $vendor
+					}
+
+					#>>>
+					group {cx group} { #<<<
+						dict set ::projinfo {*}$cx group $group
+					}
+
+					#>>>
+					debrequires {cx req} { #<<<
+						dict set ::projinfo {*}$cx requires $req
+					}
+
+					#>>>
+					applications {cx applist} { #<<<
+						package require sugar
+						set appfiles	{}
+						foreach cmdraw [sugar::scriptToList $applist] {
+							set cmd	{}
+							foreach token $cmdraw {
+								lassign $token type val
+
+								if {$type eq "TOK"} {
+									lappend cmd $val
+								}
+							}
+
+							switch -- [llength $cmd] {
+								0 {continue}
+
+								1 {
+									lappend cmd	[file join / usr bin [lindex $cmd 0]]
+								}
+
+								2 {}
+
+								default {
+									error "Invalid syntax for deb application list: ($cmd)"
+								}
+							}
+
+							lappend appfiles	{*}$cmd
+						}
+						dict set ::projinfo {*}$cx appfiles $appfiles
+					}
+
+					#>>>
+					postinst {cx scr} { #<<<
+						dict set ::projinfo {*}$cx postinst $scr
+					}
+
+					#>>>
+					prerm {cx scr} { #<<<
+						dict set ::projinfo {*}$cx prerm $scr
+					}
+
+					#>>>
+					files {cx files} { #<<<
+						dict set ::projinfo {*}$cx files $files
+					}
+
+					#>>>
+					include {cx fn} { #<<<
+						return [cflib::readfile $fn]
+					}
+
+					#>>>
+				} $settings [list debs $name]
+			}
+
+			#>>>
+			file {op args} { #<<<
+				switch -- $op {
+					tail -
+					rootname -
+					dirname -
+					extension -
+					join {file $op {*}$args}
+					default {error "Unsupported file subcommand: $op"}
+				}
+			}
+
+			#>>>
+		} [readfile $conffile]
+
+		interp delete proj
+
+		set projinfo_loaded	1
+	}
+
+	#>>>
+	method _targets {} { #<<<
+		global projinfo
+		my _load_projfile
+
+		set targets	{}
+
+		set catmap	{
+			tms				tm
+			pkgs			pkg
+			applications	app
+		}
+
+		foreach category {tms pkgs applications} {
+			if {[dict exists $projinfo $category]} {
+				foreach target [dict keys [dict get $projinfo $category]] {
+					set cat	[dict get $catmap $category]
+					lappend targets [list $cat $target]
+				}
+			}
+		}
+
+		set tms		{}
+		set pkgs	{}
+		set apps	{}
+		foreach {cat target} [concat {*}[lsort -unique $targets]] {
+			switch -- $cat {
+				tm	{lappend tms	$cat $target}
+				pkg	{lappend pkgs	$cat $target}
+				app	{lappend apps	$cat $target}
+			}
+		}
+		return [concat $tms $pkgs $apps]
+	}
+
+	#>>>
+	method import_runtime {path platform} { #<<<
+		package require platform
+
+		if {![file exists $path]} {
+			puts stderr "Invalid path: \"$path\" pwd: ([pwd])"
+			exit 1
+		}
+		set fqpath	[file normalize $path]
+
+		# Special case: win32 runtime on a linux host that can run it with
+		# wine (works - how to accomodate it?)
+		if {$platform ni [platform::patterns [platform::identify]]} {
+			puts stderr "Runtime is incompatible with this platform, please import it on a compatible platform and copy the imported version here"
+			exit 1
+		}
+
+		# runtime is compatible with the platform we're running on, interrogate it
+
+		lassign [chan pipe] readpipe writepipe
+
+		set handle	[open [list |$fqpath >@ $writepipe] w]
+		close $writepipe
+		chan configure $handle -blocking 0
+		puts -nonewline $handle {
+			catch {package require __no_such_package}
+			set runtime_info	{}
+			set builtin	{}
+			foreach package [package names] {
+				try {
+					lindex [lsort -command {package vcompare} [package versions $package]] end
+				} on error {errmsg options} {
+					puts stderr "Couldn't load package: \"$package\": $errmsg"
+				} on ok {ver} {
+					if {$ver eq ""} {
+						set ver	[package require $package]
+					}
+					lappend builtin $package $ver
+				}
+			}
+			lappend runtime_info builtin_packages $builtin
+			puts -nonewline $runtime_info
+			exit 0
+		}
+		chan configure $handle -blocking 1
+		try {
+			chan close $handle
+		} trap {CHILDSTATUS} {errmsg options} {
+			set exitstatus	[lindex [dict get $options -errorcode] 2]
+			puts stderr "Interrogation failed ($exitstatus): $errmsg"
+			exit 1
+		} on ok {} {
+			set output	[read $readpipe]
+		} on error {errmsg options} {
+			puts "WARNING: interrogation wrote to stderr:\n$errmsg"
+			set output	[read $readpipe]
+		} finally {
+			chan close $readpipe
+		}
+
+		try {
+			if {![dict exists $output builtin_packages]} {
+				error ""
+			}
+		} on error {} {
+			puts stderr "Could not parse interrogation result:\n$output"
+			exit 1
+		}
+
+		set runtime_base	[file join \
+				[dict get $::tbuildconf repo_base] \
+				runtimes \
+				$platform]
+		set runtime_data	[readfile $path binary]
+		set runtime_outfn	[file join $runtime_base bin [file tail $path]]
+		set info_outfn		[file join $runtime_base info [file tail $path]]
+
+		if {![file exists [file join $runtime_base bin]]} {
+			file mkdir [file join $runtime_base bin]
+		}
+		if {![file exists [file join $runtime_base info]]} {
+			file mkdir [file join $runtime_base info]
+		}
+
+		set attribs	[file attributes $path]
+		writefile $runtime_outfn $runtime_data binary
+		if {[dict exists $attribs -longname]} {
+			dict unset attribs -longname
+		}
+		if {[dict exists $attribs -shortname]} {
+			dict unset attribs -shortname
+		}
+		file attributes $runtime_outfn {*}$attribs
+		writefile $info_outfn $output binary
+		puts "Imported runtime \"$path\": \"[file normalize $info_outfn]\""
+		exit 0
+	}
+
+	#>>>
+	method _in_tmp_dir {script} { #<<<
+		set oldpwd		[pwd]
+		set tempfp	[file tempfile tmpdir]
+		close $tempfp
+		file delete $tmpdir
+		file mkdir $tmpdir
+		cd $tmpdir
+		try {
+			uplevel $script
+		} on error {errmsg options} {
+			dict incr options -level
+			return -options $options $errmsg
+		} finally {
+			cd $oldpwd
+			if {[info exists tmpdir] && [file exists $tmpdir]} {
+				# TODO: paranoid checks
+				file delete -force -- $tmpdir
+			}
+		}
+	}
+
+	#>>>
+	method run {args} { #<<<
+		package require platform
+		set cfg	[cflib::config new $args [subst {
+			variable platform	[list [dict get $::tbuildconf default_platform]]
+			variable runtime	[list [dict get $::tbuildconf default_runtime]]
+			variable runprefix	{}
+			variable interactive	1
+		}]]
+		set args	[$cfg rest]
+		set platform	[$cfg get platform]
+		lassign [my _select_runtime [$cfg get runtime] $platform] \
+				runtime_name \
+				runtime_version \
+				runtime_path \
+				runtime_info
+		set fp	[file tempfile launcherfn]
+		chan puts $fp [string map [list %i% [$cfg get interactive] %p% [list $platform] %b% [file normalize ~]] {
+package require platform
+
+foreach pattern [platform::patterns %p%] {
+	set tmpath	[file normalize [file join %b% .tbuild repo tm $pattern]]
+	if {[file isdirectory $tmpath]} {
+		::tcl::tm::path add $tmpath
+	}
+	set pkgpath	[file normalize [file join %b% .tbuild repo pkg $pattern]]
+	if {[file isdirectory $pkgpath]} {
+		lappend ::auto_path	$pkgpath
+	}
+}
+
+set argv	[lassign $argv app]
+set argv0	$app
+if {$app ne ""} {
+	source $app
+} else {
+	set ::tcl_interactive	1
+	while {1} {
+		apply {
+			{} {
+				if {%i%} {
+					puts -nonewline "> "; flush stdout
+				}
+				set cmd	[chan gets stdin]
+				if {[chan eof stdin]} {exit}
+				try {
+					uplevel #0 $cmd
+				} on error {errmsg options} {
+					puts stderr $errmsg
+				} on ok {res} {
+					if {$res ne ""} {
+						puts $res
+					}
+				}
+			}
+		}
+	}
+}
+		}]
+		chan close $fp
+		set exitstatus	0
+		set runprefix	[$cfg get runprefix]
+		try {
+			exec {*}$runprefix $runtime_path $launcherfn {*}$args >@ stdout 2>@ stderr <@ stdin
+		} trap {CHILDSTATUS} {errmsg options} {
+			lassign [dict get $options -errorcode] code pid status
+			set exitstatus	$status
+		} finally {
+			if {[file exists $launcherfn]} {
+				file delete $launcherfn
+			}
+		}
+
+		exit $exitstatus
+	}
+
+	#>>>
+	method _os {} { #<<<
+		set build	[string tolower $::tcl_platform(os)]
+		switch -- $::tcl_platform(platform) {
+			unix {
+				try {
+					exec lsb_release --id
+				} on ok {output} {
+					set idx	[string first ":" $output]
+					if {$idx != -1} {
+						set distribution	[string range $output $idx+1 end]
+						set distribution	[string tolower [string trim $distribution]]
+					}
+				} trap {POSIX ENOENT} {} {}
+				if {![info exists distribution]} {
+					if {[file exists /etc/SuSE-release]} {
+						set distribution	"suse"
+					} elseif {[file exists /etc/redhat-release]} {
+						set distribution	"redhat"
+					} elseif {[file exists /etc/fedora-release]} {
+						set distribution	"fedora"
+					} elseif {[file exists /etc/debian-release]} {
+						set distribution	"debian"
+					} elseif {[file exists /etc/gentoo-release]} {
+						set distribution	"gentoo"
+					} elseif {[file exists /etc/slackware-release]} {
+						set distribution	"slackware"
+					} else {
+						set distribution	"unknown"
+					}
+				}
+
+				append build "_" $distribution
+				return $build
+			}
+
+			windows {
+				return $build
+			}
+		}
+	}
+
+	#>>>
+	method os {} { #<<<
+		puts [my _os]
+	}
+
+	#>>>
+	method setup_rpm_build_environment {} { #<<<
+		package require rpm
+
+		try {
+			exec rpm --version
+		} trap {POSIX ENOENT} {errmsg options} {
+			puts "RPM isn't installed, installing"
+			switch -- [my _os] {
+				linux_ubuntu - linux_debian {
+					try {
+						exec -ignorestderr sudo apt-get install rpm >@ stdout
+					} on error {errmsg options} {
+						puts stderr "Couldn't install RPM: $errmsg"
+						return
+					}
+				}
+
+				windows {
+					puts stderr "Cannot build RPMS on windows"
+					return
+				}
+
+				linux_suse - linux_redhat {
+					puts stderr "RPM not installed on an RPM based distro?  Weird man"
+					return
+				}
+
+				default {
+					puts stderr "Don't know how to install RPM for platform \"[my _os]\""
+					return
+				}
+			}
+		}
+
+		set dirs		{}
+		foreach dir [list \
+				[rpm::rpm --eval %_sourcedir] \
+				[rpm::rpm --eval %_specdir] \
+				[rpm::rpm --eval %_srcrpmdir] \
+				[rpm::rpm --eval %_rpmdir] \
+				[rpm::rpm --eval %_builddir] \
+		] {
+			if {![file writable $dir]} {
+				lappend dirs $dir
+			}
+		}
+
+		if {[llength $dirs] == 0} {
+			puts "Permissions look ok already"
+			return
+		}
+
+		puts "We need to change the ownership of the following system directories"
+		puts "and their contents so that they are writable by the current"
+		puts "user ($::env(USER)):"
+		puts "\t[join $dirs \n\t]"
+		try {
+			exec sudo chown -R $::env(USER) {*}$dirs 2>@1
+		} trap {CHILDSTATUS} {errmsg options} {
+			lassign [dict get $options -errorcode] ecode pid code
+			puts stderr "Could not set permissions: $errmsg"
+		} on ok {output} {
+			puts "Ownership set"
+		}
+	}
+
+	#>>>
+}
+
+actions init
+
+if {[llength $argv] == 0} {
+	set argv	[list "build"]
+}
+
+set actionargs	[lassign $argv action]
+actions $action {*}$actionargs
+
+_init.tcl {F 281 56070} tbuild.tcl {F 55789 55789} pkgIndex.tcl {F 78 56148}app-tbuild {D 76 76}tcl {D 20 20}package provide dsl 0.4
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+namespace eval dsl {}
+
+proc dsl::decomment {in} { #<<<
+	set out	""
+
+	foreach line [split $in \n] {
+		if {[string index [string trim $line] 0] eq "#"} continue
+		append out	$line "\n"
+	}
+
+	return $out
+}
+
+#>>>
+# Reserved dsl commands:
+#	if
+#	info
+#	rename
+#	apply
+#	foreach
+#	namespace
+proc dsl::dsl_eval {interp dsl_commands dsl_script args} { #<<<
+	set aliases_old	{}
+	set tmpns		::_dsl_[incr ::dsl::seq]
+	set cmds		{}
+	try {
+		interp eval $interp [format {namespace eval %s {}} [list $tmpns]]
+		foreach {cmdname cmdargs cmdbody} [dsl::decomment $dsl_commands] {
+			if {$cmdname in {if info rename apply foreach namespace}} {
+				error "\"$cmdname\" is a reserved word and cannot be used for a DSL command"
+			}
+			interp eval $interp [format {
+				if {[info commands ::%1$s] ne ""} {
+					rename ::%1$s %2$s::%1$s
+				}
+			} [list $cmdname] [list $tmpns]]
+			lappend cmds	$cmdname
+			#set alias	[interp alias $interp $cmdname]
+			#if {$alias eq ""} {
+			#	dict set aliases_old $cmdname [list {}]
+			#} else {
+			#	dict set aliases_old $cmdname [list [interp target $interp $cmdname] $alias]
+			#}
+
+			interp alias $interp $cmdname {} apply [list $cmdargs $cmdbody [uplevel {namespace current}]] {*}$args
+		}
+
+		if {$interp eq {}} {
+			apply [list {} $dsl_script [uplevel 1 {namespace current}]]
+		} else {
+			interp eval $interp $dsl_script
+		}
+	} finally {
+		#dict for {cmdname oldalias} $aliases_old {
+		#	interp alias $interp $cmdname {*}$oldalias
+		#}
+		interp eval $interp [format {
+			apply {{} {
+				foreach cmd %2$s {
+					rename ::$cmd {}
+					if {[info commands %1$s::$cmd] ne ""} {
+						rename %1$s::$cmd ::$cmd
+					}
+				}
+				namespace delete %1$s
+			}}
+		} [list $tmpns] [list $cmds]]
+	}
+}
+
+#>>>
+
+package provide zip 1.2.1
+# mkzip.tcl -- Copyright (C) 2009 Pat Thoyts <patthoyts@users.sourceforge.net>
+#
+#        Create ZIP archives in Tcl.
+#
+# Create a zipkit using mkzip filename.zkit -zipkit -directory xyz.vfs
+# or a zipfile using mkzip filename.zip -directory dirname -exclude "*~"
+#
+# version 1.2
+
+package require Tcl 8.6
+
+namespace eval zip {}
+
+# zip::timet_to_dos {time_t} <<<
+#
+#        Convert a unix timestamp into a DOS timestamp for ZIP times.
+#
+#   DOS timestamps are 32 bits split into bit regions as follows:
+#                  24                16                 8                 0
+#   +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+
+#   |Y|Y|Y|Y|Y|Y|Y|m| |m|m|m|d|d|d|d|d| |h|h|h|h|h|m|m|m| |m|m|m|s|s|s|s|s|
+#   +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+
+#
+proc zip::timet_to_dos {time_t} {
+	set s [clock format $time_t -format {%Y %m %e %k %M %S}]
+	scan $s {%d %d %d %d %d %d} year month day hour min sec
+	expr {(($year-1980) << 25) | ($month << 21) | ($day << 16) 
+		| ($hour << 11) | ($min << 5) | ($sec >> 1)}
+}
+
+#>>>
+# zip::pop {varname {nth 0}} <<<
+#
+#        Pop an element from a list
+#
+proc zip::pop {varname {nth 0}} {
+	upvar $varname args
+	set r [lindex $args $nth]
+	set args [lreplace $args $nth $nth]
+	return $r
+}
+
+#>>>
+# zip::walk {base {excludes ""} {match *} {path {}}} <<<
+#
+#        Walk a directory tree rooted at 'path'. The excludes list can be
+#        a set of glob expressions to match against files and to avoid.
+#        The match arg is internal.
+#        eg: walk library {CVS/* *~ .#*} to exclude CVS and emacs cruft.
+#
+proc zip::walk {base {excludes ""} {match *} {path {}}} {
+	set result {}
+	set imatch [file join $path $match]
+	set files [glob -nocomplain -tails -types f -directory $base $imatch]
+	foreach file $files {
+		set excluded 0
+		foreach glob $excludes {
+			if {[string match $glob $file]} {
+				set excluded 1
+				break
+			}
+		}
+		if {!$excluded} {lappend result $file}
+	}
+	foreach dir [glob -nocomplain -tails -types d -directory $base $imatch] {
+		set subdir [walk $base $excludes $match $dir]
+		if {[llength $subdir]>0} {
+			set result [concat $result [list $dir] $subdir]
+		}
+	}
+	return $result
+}
+
+#>>>
+# zip::mkzipfile {zipchan base path {comment ""}} <<<
+#
+#        Add a single file to a zip archive. The zipchan channel should
+#        already be open and binary. You may provide a comment for the
+#        file The return value is the central directory record that
+#        will need to be used when finalizing the zip archive.
+#
+# FIX ME: should  handle the current offset for non-seekable channels
+#
+proc zip::mkzipfile {zipchan base path {comment ""}} {
+	set fullpath [file join $base $path]
+	set mtime [timet_to_dos [file mtime $fullpath]]
+	if {[file isdirectory $fullpath]} {
+		append path	/
+	}
+	set utfpath [encoding convertto utf-8 $path]
+	set utfcomment [encoding convertto utf-8 $comment]
+	set flags [expr {(1<<11)}] ;# utf-8 comment and path
+	set method 0               ;# store 0, deflate 8
+	set attr 0                 ;# text or binary (default binary)
+	set version 20             ;# minumum version req'd to extract
+	set extra ""
+	set crc 0
+	set size 0
+	set csize 0
+	set data ""
+	set seekable [expr {[tell $zipchan] != -1}]
+	if {[file isdirectory $fullpath]} {
+		set attrex 0x41ff0010  ;# 0o040777 (drwxrwxrwx)
+	} elseif {[file executable $fullpath]} {
+		set attrex 0x81ff0080  ;# 0o100777 (-rwxrwxrwx)
+	} else {
+		set attrex 0x81b60020  ;# 0o100666 (-rw-rw-rw-)
+		if {[file extension $fullpath] in {".tcl" ".txt" ".c"}} {
+			set attr 1         ;# text
+		}
+	}
+
+	if {[file isfile $fullpath]} {
+		set size [file size $fullpath]
+		if {!$seekable} {set flags [expr {$flags | (1 << 3)}]}
+	}
+
+	set offset [tell $zipchan]
+	set local [binary format a4sssiiiiss PK\03\04 \
+			$version $flags $method $mtime $crc $csize $size \
+			[string length $utfpath] [string length $extra]]
+	append local $utfpath $extra
+	puts -nonewline $zipchan $local
+
+	if {[file isfile $fullpath]} {
+		# If the file is under 2MB then zip in one chunk, otherwize we use
+		# streaming to avoid requiring excess memory. This helps to prevent
+		# storing re-compressed data that may be larger than the source when
+		# handling PNG or JPEG or nested ZIP files.
+		if {$size < 0x00200000} {
+			set fin [open $fullpath rb]
+			set data [read $fin]
+			set crc [zlib crc32 $data]
+			set cdata [zlib deflate $data]
+			if {[string length $cdata] < $size} {
+				set method 8
+				set data $cdata
+			}
+			close $fin
+			set csize [string length $data]
+			puts -nonewline $zipchan $data
+		} else {
+			set method 8
+			set fin [open $fullpath rb]
+			set zlib [zlib stream deflate]
+			while {![eof $fin]} {
+				set data [read $fin 4096]
+				set crc [zlib crc32 $data $crc]
+				$zlib put $data
+				if {[string length [set zdata [$zlib get]]]} {
+					incr csize [string length $zdata]
+					puts -nonewline $zipchan $zdata
+				}
+			}
+			close $fin
+			$zlib finalize
+			set zdata [$zlib get]
+			incr csize [string length $zdata]
+			puts -nonewline $zipchan $zdata
+			$zlib close
+		}
+
+		if {$seekable} {
+			# update the header if the output is seekable
+			set local [binary format a4sssiiii PK\03\04 \
+					$version $flags $method $mtime $crc $csize $size]
+			set current [tell $zipchan]
+			seek $zipchan $offset
+			puts -nonewline $zipchan $local
+			seek $zipchan $current
+		} else {
+			# Write a data descriptor record
+			set ddesc [binary format a4iii PK\7\8 $crc $csize $size]
+			puts -nonewline $zipchan $ddesc
+		}
+	}
+
+	set hdr [binary format a4ssssiiiisssssii PK\01\02 0x0317 \
+			$version $flags $method $mtime $crc $csize $size \
+			[string length $utfpath] [string length $extra]\
+			[string length $utfcomment] 0 $attr $attrex $offset]
+	append hdr $utfpath $extra $utfcomment
+	return $hdr
+}
+
+#>>>
+# zip::mkzip {filename args} <<<
+#
+#        Create a zip archive in 'filename'. If a file already exists it will be
+#        overwritten by a new file. If '-directory' is used, the new zip archive
+#        will be rooted in the provided directory.
+#        -runtime can be used to specify a prefix file. For instance, 
+#        zip myzip -runtime unzipsfx.exe -directory subdir
+#        will create a self-extracting zip archive from the subdir/ folder.
+#        The -comment parameter specifies an optional comment for the archive.
+#
+#        eg: zip my.zip -directory Subdir -runtime unzipsfx.exe *.txt
+# 
+proc zip::mkzip {filename args} {
+	try {
+		set chan	[open $filename wb]
+		zip::mkzipchan $chan {*}$args
+	} finally {
+		if {[info exists chan] && $chan in [chan names]} {
+			close $chan
+		}
+	}
+}
+
+#>>>
+proc zip::mkzipchan {zf args} { #<<<
+	array set opts {
+		-zipkit 0 -runtime "" -comment "" -directory ""
+		-exclude {CVS/* */CVS/* *~ ".#*" "*/.#*"}
+	}
+
+	while {[string match -* [set option [lindex $args 0]]]} {
+		switch -exact -- $option {
+			-zipkit  { set opts(-zipkit) 1 }
+			-comment { set opts(-comment) [encoding convertto utf-8 [pop args 1]] }
+			-runtime { set opts(-runtime) [pop args 1] }
+			-directory {set opts(-directory) [file normalize [pop args 1]] }
+			-exclude {set opts(-exclude) [pop args 1] }
+			-- { pop args ; break }
+			default {
+				break
+			}
+		}
+		pop args
+	}
+
+	if {$opts(-runtime) ne ""} {
+		set rt [open $opts(-runtime) rb]
+		fcopy $rt $zf
+		close $rt
+	} elseif {$opts(-zipkit)} {
+		set zkd "#!/usr/bin/env tclkit\n\# This is a zip-based Tcl Module\n"
+		append zkd "package require vfs::zip\n"
+		append zkd "vfs::zip::Mount \[info script\] \[info script\]\n"
+		append zkd "if {\[file exists \[file join \[info script\] main.tcl\]\]} {\n"
+		append zkd "    source \[file join \[info script\] main.tcl\]\n"
+		append zkd "}\n"
+		append zkd \x1A
+		puts -nonewline $zf $zkd
+	}
+
+	set count 0
+	set cd ""
+
+	if {$opts(-directory) ne ""} {
+		set paths [walk $opts(-directory) $opts(-exclude)]
+	} else {
+		set paths [glob -nocomplain {*}$args]
+	}
+	foreach path $paths {
+		puts $path
+		append cd [mkzipfile $zf $opts(-directory) $path]
+		incr count
+	}
+	set cdoffset [tell $zf]
+	set endrec [binary format a4ssssiis PK\05\06 0 0 \
+			$count $count [string length $cd] $cdoffset\
+			[string length $opts(-comment)]]
+	append endrec $opts(-comment)
+	puts -nonewline $zf $cd
+	puts -nonewline $zf $endrec
+
+	return
+}
+
+#>>>
+
+# Modifications below Copyright (c) 2010 Cyan Ogilvie, licensed BSD
+proc zip::mkzipdata {args} { #<<<
+	#package require Memchan
+	#set chan	[memchan]
+	set chan	[file tempfile]
+	try {
+		chan configure $chan -translation binary -encoding binary
+		zip::mkzipchan $chan {*}$args
+		chan seek $chan 0
+		chan read $chan
+	} finally {
+		if {[info exists chan] && $chan in [chan names]} {
+			chan close $chan
+		}
+	}
+}
+
+#>>>
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+package provide deb 0.3
+package require cflib 1.5.0
+
+package require cflib 1.6.0
+package require sugar
+
+namespace eval deb {
+	variable debug	0
+	proc make_deb {settings files} { #<<<
+		variable templates
+		variable debug
+
+		set installfiles_script {#!/usr/bin/env cfkit8.6
+
+			proc writefile {fn data} {
+				set dir	[file dirname [file normalize [file join [pwd] $fn]]]
+				if {![file exists $dir]} {
+					file mkdir $dir
+				}
+				set h	[open $fn w]
+				try {
+					chan configure $h -translation binary -encoding binary
+					chan puts -nonewline $h $data
+				} finally {
+					chan close $h
+				}
+			}
+			lassign $::argv base
+			dict for {fn info} %FILES% {
+				set outfn	[file join $base [string trimleft $fn /]]
+				set data	[dict get $info data]
+				set perms	[dict get $info perms]
+				writefile $outfn [binary decode base64 $data]
+				file attributes $outfn -permissions $perms
+			}
+		}
+
+		set here	[file normalize [pwd]]
+		set now		[clock seconds]
+		cflib::in_tmp_dir {
+			set base	[pwd]
+			file mkdir build
+			cd build
+
+			set replacements	[dict create]
+			dict set replacements %DATE% 			[clock format $now -format "%a, %d %b %Y %H:%M:%S %z"]
+			dict set replacements %AUTHOR_NAME%		"Cyan Ogilvie"
+			dict set replacements %AUTHOR_EMAIL%	"cyan.ogilvie@gmail.com"
+			dict set replacements %PACKAGE_NAME%	""
+			dict set replacements %VERSION%			"0.1"
+			dict set replacements %RELEASE%			"1"
+			dict set replacements %SECTION%			"utils"
+			dict set replacements %SUMMARY%			"No summary"
+			dict set replacements %DESCRIPTION%		"No description"
+			dict set replacements %DEPENDS%			{}
+
+			set replacements	[dict merge $replacements $settings]
+
+			if {![dict exists $replacements %LICENSE%]} {
+				dict set replacements %LICENSE%			"Copyright (C) [clock format [clock seconds] -format %Y] [dict get $replacements %AUTHOR_NAME%] <[dict get $replacements %AUTHOR_EMAIL%]>\nAll rights reserved"
+			}
+			set depends [join [dict get $replacements %DEPENDS%] ", "]
+			if {$depends ne ""} {
+				set depends	", $depends"
+			}
+			dict set replacements %DEPENDS% $depends
+
+			dict set replacements %SUMMARY%	[string trim [dict get $replacements %SUMMARY%]]
+
+			set description	""
+			foreach line [split [string trim [dict get $replacements %DESCRIPTION%]] \n] {
+				append description	" " [string trim $line] \n
+			}
+			dict set replacements %DESCRIPTION% $description
+
+			set outfiles	[dict create]
+			dict for {fn data} $templates {
+				dict set outfiles	$fn [string map $replacements $data]
+			}
+
+			dict for {fn info} $outfiles {
+				set data	[dict get $info data]
+				set perms	[dict get $info perms]
+				set dir	[file dirname $fn]
+				if {![file exists $dir]} {
+					file mkdir $dir
+				}
+				cflib::writefile $fn $data
+				file attributes $fn -permissions $perms
+			}
+
+			cflib::writefile Makefile {DESTDIR=
+
+all:
+
+clean:
+
+install: all
+	./installfiles.tcl $(DESTDIR)/
+}
+			dict for {fn info} $files {
+				dict set files $fn data [binary encode base64 [dict get $info data]]
+			}
+
+			if {[dict exists $replacements %POSTINST%]} {
+				cflib::writefile [file join debian postinst] \
+						[dict get $replacements %POSTINST%]
+				file attributes [file join debian postinst] -permissions 0755
+			}
+			if {[dict exists $replacements %PRERM%]} {
+				cflib::writefile [file join debian prerm] \
+						[dict get $replacements %PRERM%]
+				file attributes [file join debian prerm] -permissions 0755
+			}
+			set installfiles_out	{}
+			foreach cmd [sugar::scriptToList $installfiles_script] {
+				set outcmd	{}
+				foreach word $cmd {
+					lassign $word type details
+					if {$type eq "TOK" && $details eq "%FILES%"} {
+						set word	[list TOK "\[[list dict create {*}$files]\]"]
+					}
+					lappend outcmd	$word
+				}
+				lappend installfiles_out	$outcmd
+			}
+			cflib::writefile installfiles.tcl [sugar::listToScript $installfiles_out]
+			file attributes installfiles.tcl -permissions 0755
+
+			try {
+				exec -ignorestderr -- dpkg-buildpackage -b -uc
+			} on error {errmsg options} {
+				if {$::deb::debug} {
+					exec $::env(SHELL) <@ stdin >@ stdout 2>@ stderr
+				}
+			}
+			cd $base
+			set built	[lindex [glob -nocomplain -type f *.deb] 0]
+			if {$built eq ""} {
+				error "No deb built"
+			}
+			set deb_data	[cflib::readfile $built binary]
+		}
+		list [file tail $built] $deb_data
+	}
+
+	#>>>
+}
+namespace eval deb {	variable templates [dict create]
+	dict set templates debian/dirs perms 00644
+	dict set templates debian/dirs data {usr/bin
+}
+	dict set templates debian/control perms 00644
+	dict set templates debian/control data {Source: %PACKAGE_NAME%
+Section: %SECTION%
+Priority: extra
+Maintainer: %AUTHOR_NAME% <%AUTHOR_EMAIL%>
+Build-Depends: debhelper (>= 7)
+Standards-Version: 3.8.1
+
+Package: %PACKAGE_NAME%
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}%DEPENDS%
+Description: %SUMMARY%
+%DESCRIPTION%
+}
+	dict set templates debian/rules perms 00755
+	dict set templates debian/rules data {#!/usr/bin/make -f
+# -*- makefile -*-
+# Sample debian/rules that uses debhelper.
+# This file was originally written by Joey Hess and Craig Small.
+# As a special exception, when this file is copied by dh-make into a
+# dh-make output file, you may use that output file without restriction.
+# This special exception was added by Craig Small in version 0.37 of dh-make.
+
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
+
+
+
+
+
+configure: configure-stamp
+configure-stamp:
+	dh_testdir
+	# Add here commands to configure the package.
+
+	touch configure-stamp
+
+
+build: build-stamp
+
+build-stamp: configure-stamp  
+	dh_testdir
+
+	# Add here commands to compile the package.
+	$(MAKE)
+	#docbook-to-man debian/%PACKAGE_NAME%.sgml > cfkit.1
+
+	touch $@
+
+clean: 
+	dh_testdir
+	dh_testroot
+	rm -f build-stamp configure-stamp
+
+	# Add here commands to clean up after the build process.
+	$(MAKE) clean
+
+	dh_clean
+
+install: build
+	dh_testdir
+	dh_testroot
+	dh_prep   --exclude ./build/win32/tk/Makefile.orig --exclude ./build/win32/tcl/Makefile.orig
+	dh_installdirs
+
+	# Add here commands to install the package into debian/%PACKAGE_NAME%.
+	$(MAKE) DESTDIR=$(CURDIR)/debian/%PACKAGE_NAME% install
+
+
+# Build architecture-independent files here.
+binary-indep: install
+# We have nothing to do by default.
+
+# Build architecture-dependent files here.
+binary-arch: install
+	dh_testdir
+	dh_testroot
+	dh_installchangelogs 
+	dh_installdocs
+	dh_installexamples
+#	dh_install
+#	dh_installmenu
+#	dh_installdebconf
+#	dh_installlogrotate
+#	dh_installemacsen
+#	dh_installpam
+#	dh_installmime
+#	dh_python
+#	dh_installinit
+#	dh_installcron
+#	dh_installinfo
+	dh_installman
+	dh_link
+#	dh_strip
+	dh_compress
+	dh_fixperms
+#	dh_perl
+#	dh_makeshlibs
+	dh_installdeb
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+binary: binary-indep binary-arch
+.PHONY: build clean binary-indep binary-arch binary install configure
+}
+	dict set templates debian/changelog perms 00644
+	dict set templates debian/changelog data {%PACKAGE_NAME% (%VERSION%-%RELEASE%) unstable; urgency=low
+
+  * tbuild generated package - no changelog history available, sorry.
+
+ -- %AUTHOR_NAME% <%AUTHOR_EMAIL%>  %DATE%
+}
+	dict set templates debian/compat perms 00644
+	dict set templates debian/compat data {7
+}
+	dict set templates debian/copyright perms 00644
+	dict set templates debian/copyright data {%LICENSE%
+}
+}
+package require cflib
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+cflib::pclass create sop::signal {
+	superclass cflib::handlers cflib::baselog
+
+	property name		""	_name_changed
+	property debugmode	0
+	property output_handler_warntime	3000
+
+	variable {*}{
+		outputs
+		cleanups
+		o_state
+		afterids
+		changewait
+		seq
+	}
+
+	method _name_changed {} { #<<<
+		set baselog_instancename	$name
+	}
+
+	#>>>
+
+	constructor {accessvar args} { #<<<
+		my variable outputs o_state
+		set name		""
+		set outputs		{}
+		set o_state		0
+		set seq			0
+
+		set cleanups	[dict create]
+		set afterids	[dict create]
+		array set changewait	{}
+
+		my configure {*}$args
+
+		upvar $accessvar scopevar
+		set scopevar	[self]
+		trace variable scopevar u [namespace code {my _scopevar_unset}]
+	}
+
+	#>>>
+	destructor { #<<<
+		my _debug debug "tlc::Signal::destructor: [self] $name dieing"
+		#trace vdelete scopevar u [namespace code {my _scopevar_unset}]
+		if {$debugmode} {
+			dict for {tag afterid} $afterids {
+				after cancel $afterid
+				dict unset afterids $tag
+			}
+		}
+		foreach output $outputs {
+			my _debug debug "tlc::Signal::destructor: ------ twitch: ($output)"
+			my detach_output $output
+		}
+
+		foreach {key info} [array get changewait] {
+			my _debug debug "notifying waiting changewait($key) of our death"
+			set rest	[lassign $info type state]
+			if {$state ne "waiting"} continue
+			switch -- $type {
+				coro {
+					set coro	[lindex $rest 0]
+					set changewait($key)	[list $type "source_died"]
+					$coro "source_died"
+				}
+
+				vwait {
+					set changewait($key)	[list $type "source_died"]
+				}
+
+				default {
+					my _debug error "Invalid changewait type ($type) when trying to signal source death"
+				}
+			}
+		}
+		if {[self next] ne {}} {next}
+		my _debug debug "tlc::Signal::destructor: [self] truely dead"
+	}
+
+	#>>>
+
+	method state {args} { #<<<
+		switch -exact -- [llength $args] {
+			0		{set o_state}
+			default	{tailcall my set_state {*}$args}
+		}
+	}
+
+	#>>>
+	method set_state {newstate} { #<<<
+		my variable o_state
+		if {![string is boolean -strict $newstate]} {
+			throw [list not_a_boolean $newstate] \
+					"newstate must be a valid boolean"
+		}
+		if {$newstate} {
+			set normstate	1
+		} else {
+			set normstate	0
+		}
+		my _on_set_state $normstate
+		if {$o_state == $normstate} return
+		set o_state	$normstate
+		my _update_outputs
+	}
+
+	#>>>
+	method toggle_state {} { #<<<
+		my variable o_state
+		my set_state [expr {!$o_state}]
+	}
+
+	#>>>
+
+	method attach_output {handler {cleanup {}}} { #<<<
+		my variable outputs
+		if {$handler in $outputs} {
+			return 0
+		}
+
+		lappend outputs $handler
+		
+		if {$cleanup ne {}} {
+			dict set cleanups $handler	$cleanup
+		}
+		my _update_output $handler
+		
+		return 1
+	}
+
+	#>>>
+	method detach_output {handler} { #<<<
+		my _debug debug "tlc::Signal::detach_output: ($handler)"
+		if {$handler in $outputs} {
+			set idx			[lsearch $outputs $handler]
+			set outputs		[lreplace $outputs $idx $idx]
+
+			if {[dict exists $cleanups $handler]} {
+				my _debug debug "tlc::Signal::detach_output: cleaning up ($handler)"
+				my _debug debug "tlc::Signal::detach_output: foo"
+				coroutine coro_handler_cleanup_[incr ::coro_seq] \
+					{*}[dict get $cleanups $handler]
+				my _debug debug "tlc::Signal::detach_output: bar"
+				dict unset cleanups $handler
+			}
+			
+			return 1
+		} else {
+			my _debug debug "tlc::Signal:detach_output: output not found!!\n($handler)\n[join $outputs \n]]\n============================="
+			return 0
+		}
+	}
+
+	#>>>
+
+	method name {} { #<<<
+		return $name
+	}
+
+	#>>>
+	method explain_txt {{depth 0}} { #<<<
+		return "[string repeat {  } $depth][self] \"[[self] name]\": [[self] state]\n"
+	}
+
+	#>>>
+
+	method waitfor {sense {timeout 0}} { #<<<
+		if {$sense} {
+			if {[my state]} return
+			set normsense	1
+		} else {
+			if {![my state]} return
+			set normsense	0
+		}
+
+		set signame	[my name]
+		set myseq	[incr seq]
+
+		if {$timeout != 0} {
+			set afterid \
+					[after $timeout [namespace code [list my _changewait_timeout $myseq]]]
+			dict set afterids waitfor_$myseq	$afterid
+		}
+
+		set resolved	0
+		while {!($resolved)} {
+			if {[info coroutine] ne ""} {
+				set changewait($myseq)	[list coro "waiting" [info coroutine]]
+				set res	[yield]
+			} else {
+				# Blegh
+				my _debug warning "Warning: using vwait implementation of waitfor.  Calling from a coroutine context is strongly advised"
+				set changewait($myseq)	[list vwait "waiting"]
+				my _debug debug "tlc::Signal::waitfor: Waiting for [namespace which -variable changewait]($myseq)"
+				vwait [namespace which -variable changewait]($myseq)
+				set res	[lindex $changewait($myseq) 1]
+			}
+			if {[string is boolean $res] && [my state] != $normsense} {
+				log warning "Woken up by transient spike while waiting for state $sense, waiting for more permanent change ($name)"
+				?? {
+					if {[info object class [self]] eq "::sop::gate"} {
+						log warning [my explain_txt]
+					}
+				}
+				set resolved	0
+			} else {
+				set resolved	1
+			}
+		}
+
+		if {[info exists afterid]} {
+			after cancel $afterid
+			unset afterid
+		}
+
+		if {$res ne "source_died"} {
+			# in the case where we have died, these data members have
+			# disappeared, and to try to access them (like unsetting them)
+			# causes a segfault
+
+			dict unset afterids waitfor_$myseq
+			array unset changewait $myseq
+		}
+
+		switch -- $res {
+			1 -
+			0 {
+				return
+			}
+
+			"timeout" {
+				throw [list timeout $signame] \
+						"Timeout waiting for signal \"$signame\""
+			}
+
+			"source_died" {
+				throw [list source_died $signame] \
+						"Source died while waiting for signal \"$signame\""
+			}
+
+			default {
+				error "Unexpected result waiting for signal \"$signame\": ($res)"
+			}
+		}
+	}
+
+	#>>>
+
+	method _update_output {handler} { #<<<
+		my variable o_state
+		#puts stderr "Signal::_update_output($o_state): $name ([self]) update output ($handler)"
+		if {$debugmode} {
+			set pending_afterid	[after $output_handler_warntime \
+					[namespace code [list my _throw_hissy $handler]]]
+			dict set afterids update_output_$handler	$pending_afterid
+		}
+		try {
+			coroutine coro_update_output_[incr ::coro_seq] \
+					{*}$handler $o_state
+		} on error {errmsg options} {
+			my log error "\n\"$name\" error updating output ($o_state) handler: ($handler) $name ([self]): $errmsg\n[dict get $options -errorinfo]"
+		}
+		if {$debugmode} {
+			after cancel $pending_afterid
+			dict unset afterids	update_output_$handler
+		}
+		#puts stderr "Signal::_update_output: $name ([self]) done"
+	}
+
+	#>>>
+	method _update_outputs {} { #<<<
+		my variable outputs
+		foreach output $outputs {
+			my _update_output $output
+		}
+		my _debug debug "tlc::Signal::_update_outputs: Flagging changewaits: ([array names changewait])"
+		foreach {key info} [array get changewait] {
+			my _debug debug "tlc::Signal::_update_outputs: flagging state change for waiting vwait: changewait($key) to ($o_state)"
+			set rest	[lassign $info type state]
+			if {$state ne "waiting"} continue
+			switch -- $type {
+				coro {
+					set coro	[lindex $rest 0]
+					set changewait($key)	[list "coro" $o_state]
+					after idle [list $coro $o_state]
+				}
+
+				vwait {
+					set changewait($key)	[list "vwait" $o_state]
+				}
+
+				default {
+					my _debug error "Invalid changewait type: ($type)"
+				}
+			}
+		}
+	}
+
+	#>>>
+	method _debug {level msg} { #<<<
+		my invoke_handlers _debug $level $msg
+	}
+
+	#>>>
+	method _on_set_state {pending} { #<<<
+	}
+
+	#>>>
+	method _throw_hissy {handler} { #<<<
+		log warning "name: ($name) obj: ([self]) taking way too long to update output for handler: ($handler)"
+	}
+
+	#>>>
+	method _scopevar_unset {args} { #<<<
+		#puts stderr "Signal::_scopevar_unset: $name ([self]) scopevar unset"
+		if {$debugmode} {
+			my _debug debug "tlc::Signal::_scopevar_unset"
+		}
+		my destroy
+	}
+
+	#>>>
+	method _changewait_timeout {myseq} { #<<<
+		if {![info exists changewait($myseq)]} {
+			my _debug error "cannot timeout: changewait($myseq) vanished!"
+			return
+		}
+		set rest	[lassign $changewait($myseq) type state]
+		if {$state ne "waiting"} return
+		switch -- $type {
+			coro {
+				set coro	[lindex $rest 0]
+				set changewait($myseq)	[list "coro" "timeout"]
+				after idle [list $coro "timeout"]
+			}
+
+			vwait {
+				set changewait($myseq)	[list "vwait" "timeout"]
+			}
+
+			default {
+				my _debug error "Invalid changewait type: ($type)"
+			}
+		}
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+cflib::pclass create sop::gate {
+	superclass sop::signal
+
+	pclass_config {
+		constructor_auto_next	0
+	}
+
+	property mode		"or"	_mode_changed
+	property default	0		_default_changed
+
+	method _mode_changed {} { #<<<
+		set valid_modes	{and nand nor or}
+		if {$mode ni $valid_modes} {
+			throw {PROPERTY INVALID} "-mode must be one of ([join $valid_modes {, }])"
+		}
+		my _calc_o_state
+	}
+
+	#>>>
+	method _default_changed {} { #<<<
+		my _calc_o_state
+	}
+
+	#>>>
+
+	variable {*}{
+		inputs
+		sense
+		isvar
+		var_inputs
+	}
+
+	constructor {accessvar args} { #<<<
+		upvar $accessvar scopevar
+		next $accessvar
+
+		set inputs		[dict create]
+		set sense		[dict create]
+		set isvar		[dict create]
+		set var_inputs	{}
+
+		my configure {*}$args
+	}
+
+	#>>>
+	destructor { #<<<
+		foreach var_input $var_inputs {
+			my detach_var_input $var_input
+		}
+		foreach input [dict keys $inputs] {
+			try {
+				if {[my _isa_signal $input]} {
+					$input detach_output [my code _input_update $input]
+				}
+			} on error {errmsg options} {
+				puts stderr "Error detatching input ($input) during game destructor: $errmsg\n[dict get $options -errorinfo]"
+			}
+		}
+	}
+
+	#>>>
+	
+	method attach_input {gate_obj {a_sense normal}} { #<<<
+		if {![my _isa_signal $gate_obj]} {
+			error "$gate_obj isn't a sop::signal"
+		}
+
+		#$gate_obj register_handler debug [my code _debug]
+		dict set sense $gate_obj	[expr {$a_sense ne "normal"}]
+
+		return [$gate_obj attach_output [my code _input_update $gate_obj] \
+				[my code _cleanup $gate_obj]]
+	}
+
+	#>>>
+	method detach_input {gate_obj} { #<<<
+		if {![my _isa_signal $gate_obj]} {
+			error "$gate_obj isn't a sop::signal"
+		}
+
+		my _debug debug "tlc::Gate::detach_input ([self]): ($gate_obj)"
+
+		set ok	[catch {unset inputs($gate_obj)} msg]
+		dict unset inputs $gate_obj
+		
+		$gate_obj detach_output [my code _input_update $gate_obj]
+
+		my _calc_o_state
+	}
+
+	#>>>
+	method detach_all_inputs {} { #<<<
+		foreach vinput $var_inputs {
+			my detach_var_input $vinput
+		}
+		foreach gate_obj [dict keys $inputs] {
+			detach_input $gate_obj
+		}
+	}
+
+	#>>>
+	method attach_var_input {varname {a_sense normal}} { #<<<
+		if {$varname ni $var_inputs} {
+			lappend var_inputs	$varname
+		}
+		dict set isvar [self]::$varname	$varname
+		dict set sense [self]::$varname	[expr {$a_sense eq "inverted"}]
+		trace add variable $varname {write unset} \
+				[my code _var_input_update $varname]
+
+		my _var_input_update $varname $varname "" write
+	}
+
+	#>>>
+	method detach_var_input {varname} { #<<<
+		set idx			[lsearch $var_inputs $varname]
+		set var_inputs	[lreplace $var_inputs $idx $idx]
+		trace remove variable $varname {write unset} \
+				[my code _var_input_update $varname]
+
+		dict unset inputs [self]::$varname
+		dict unset sense [self]::$varname
+		dict unset isvar [self]::$varname
+
+		my _calc_o_state
+	}
+
+	#>>>
+
+	method explain_state {} { #<<<
+		return $inputs
+	}
+
+	#>>>
+	method explain_txt {{depth 0}} { #<<<
+		set txt	""
+		set firstdepth	[expr {($depth > 0) ? $depth-1 : 0}]
+		append txt "[self] \"[[self] name]\": [[self] state]\[$default\] [string toupper $mode] (\n"
+		foreach key [dict keys $inputs] {
+	#		append txt "[string repeat {  } $firstdepth]"
+			append txt "[string repeat {  } $depth]"
+			append txt [dict get $inputs $key]
+			append txt [expr {[dict get $sense $key] ? "i" : " "}]
+			if {[dict exists $isvar $key]} {
+				append txt "[self] var_input: [dict get $isvar $key] ([dict get $inputs $key])\n"
+			} else {
+				append txt [$key explain_txt [expr {$depth + 1}]]
+			}
+		}
+		append txt "[string repeat {  } $depth])\n"
+
+		return $txt
+	}
+
+	#>>>
+
+	method _calc_o_state {} { #<<<
+		if {[dict size $inputs] == 0} {
+			set new_o_state		$default
+		} else {
+			switch [string tolower $mode] {
+				"and" - "nor"	{set assume	1}
+				"nand" - "or"	{set assume	0}
+			}
+
+			dict for {input state} $inputs {
+				switch [string tolower $mode] {
+					"and" - "nand"	{
+						if {!($state)} {
+							set assume	[expr {!($assume)}]
+							break
+						}
+					}
+
+					"or" - "nor"	{
+						if {$state} {
+							set assume	[expr {!($assume)}]
+							break
+						}
+					}
+				}
+			}
+
+			set new_o_state		$assume
+		}
+
+		my set_state $new_o_state
+	}
+
+	#>>>
+	method _input_update {gate_obj state} { #<<<
+		if {[dict get $sense $gate_obj]} {
+			set state	[expr {!$state}]
+		}
+		my _debug debug "tlc::Gate::input_update ([self]) ($name): ($gate_obj) ($state)"
+		dict set inputs $gate_obj	$state
+
+		my _calc_o_state
+	}
+
+	#>>>
+	method _var_input_update {varname n1 n2 op} { #<<<
+		upvar $varname value
+		switch $op {
+			write {
+				if {![info exists value]} {
+					error "var doesn't exist!  ($varname)"
+				}
+				set state	[expr {
+					[string is boolean $value] && $value
+				}]
+				if {[dict get $sense [self]::$varname]} {
+					set state	[expr {!($state)}]
+				}
+				dict set inputs [self]::$varname $state
+
+				my _calc_o_state
+			}
+
+			unset {
+				my detach_var_input $varname
+			}
+		}
+	}
+
+	#>>>
+	method _cleanup {gate_obj} { #<<<
+		my detach_input $gate_obj
+	}
+
+	#>>>
+	method _isa_signal {obj} { #<<<
+		expr {
+			[info object isa typeof $obj sop::signal] ||
+			([itcl::is object $obj] && [$obj isa tlc::Signal])
+		}
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+cflib::pclass create sop::signalsource {
+	constructor {} { #<<<
+		if {[self next] ne {}} {next}
+		array set signals	{}
+	}
+
+	#>>>
+	destructor { #<<<
+		array unset signals
+		if {[self next] ne {}} {next}
+	}
+
+	#>>>
+
+	protected_property signals
+
+	method signal_ref {signal} { #<<<
+		if {![info exists signals($signal)]} {
+			error "Invalid signal ($signal)" "" [list invalid_signal $signal]
+		}
+		return $signals($signal)
+	}
+
+	#>>>
+	method signal_state {signal} { #<<<
+		if {![info exists signals($signal)]} {
+			error "Invalid signal ($signal)" "" [list invalid_signal $signal]
+		}
+		return [$signals($signal) state]
+	}
+
+	#>>>
+	method waitfor {signal {timeout 0}} { #<<<
+		if {![info exists signals($signal)]} {
+			throw [list invalid_signal $signal] "Invalid signal ($signal)"
+		}
+		$signals($signal) waitfor true $timeout
+	}
+
+	#>>>
+	method signals_available {} { #<<<
+		set build	{}
+		foreach signame [lsort -dictionary [array names signals]] {
+			lappend build	$signame $signals($signame)
+		}
+		return $build
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+# Signals:
+#	onchange()					- Fired when a variable changes value
+#	onchange_info(n1, n2, op)	- Fired when a variable changes value
+
+cflib::pclass create sop::varwatch {
+	superclass sop::signal
+
+	pclass_config {
+		constructor_auto_next	0
+	}
+
+	variable {*}{
+		watchvars
+		lock
+		afterids
+		dominos
+	}
+
+	constructor {accessvar args} { #<<<
+		set watchvars		{}
+		set lock			0
+		set afterids		{}
+		array set dominos	{}
+
+		sop::domino new dominos(onchange) -name "[self] onchange"
+
+		if {"oo::Helpers::cflib" ni [namespace path]} {
+			namespace path [concat [namespace path] {
+				::oo::Helpers::cflib
+			}]
+		}
+
+		$dominos(onchange) attach_output [code invoke_handlers onchange]
+
+		upvar $accessvar scopevar
+		next $accessvar
+
+		my configure {*}$args
+	}
+
+	#>>>
+	destructor { #<<<
+		if {[info exists dominos(onchange)] && [info object isa object $dominos(onchange)]} {
+			$dominos(onchange) destroy
+			array unset dominos onchange
+		}
+		foreach var $watchvars {
+			my detach_dirtyvar $var
+		}
+		foreach afterid $afterids {
+			after cancel $afterid
+		}
+		set afterids	{}
+		if {[self next] ne ""} next
+	}
+
+	#>>>
+
+	method attach_dirtyvar {varname} { #<<<
+		if {$varname ni $watchvars} {
+			lappend watchvars	$varname
+		}
+		trace add variable $varname {write unset} [code _var_update]
+	}
+
+	#>>>
+	method detach_dirtyvar {varname} { #<<<
+		set idx			[lsearch $watchvars $varname]
+		set watchvars	[lreplace $watchvars $idx $idx]
+		trace remove variable $varname {write unset} [code _var_update]
+	}
+
+	#>>>
+	method arm {} {incr lock -1}
+	method disarm {} {incr lock}
+	method is_armed {} {expr {$lock > 0}}
+	method force_if_pending {} { #<<<
+		set pending		$afterids
+		set afterids	{}
+		foreach afterid $pending {
+			set script	[lindex [after info $afterid] 0]
+			after cancel $afterid
+			if {$script ne ""} {
+				try {
+					uplevel #0 $script
+				} on error {errmsg options} {
+					puts [dict get $options -errorinfo]
+				}
+			}
+		}
+		$dominos(onchange) force_if_pending
+	}
+
+	#>>>
+	method _on_set_state {pending} { #<<<
+		set pending		$afterids
+		set afterids	{}
+		foreach afterid $pending {
+			after cancel $afterid
+		}
+	}
+
+	#>>>
+	method _var_update {n1 n2 op} { #<<<
+		if {$lock > 0} return
+		my set_state 1
+		if {[my handlers_available onchange_info]} {
+			lappend afterids	[after idle [code fire_onchange $n1 $n2 $op]]
+		}
+		$dominos(onchange) tip
+	}
+
+	#>>>
+	method _fire_onchange {n1 n2 op} { #<<<
+		my invoke_handlers onchange_info $n1 $n2 $op
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+cflib::pclass create sop::statetoggle {
+	superclass sop::gate
+	mixin cflib::baselog
+
+	pclass_config {
+		constructor_auto_next	0
+	}
+
+	property explain	0
+
+	variable {*}{
+		name
+		target
+		toggles
+		deleting
+		lasterror
+	}
+
+	constructor {accessvar args} { #<<<
+		set deleting	0
+
+		upvar $accessvar scopevar
+		next $accessvar
+
+		if {"oo::Helpers::cflib" ni [namespace path]} {
+			namespace path [concat [namespace path] {
+				::oo::Helpers::cflib
+			}]
+		}
+
+		set configureargs	{}
+		# Process in-line configure arguments
+		while {[string index [lindex $args 0] 0] eq "-"} {
+			set args	[lassign $args opt val]
+			lappend configureargs	$opt $val
+		}
+		set toggles	[lassign $args target]
+		if {![winfo exists $target]} {
+			error "Widget: ($target) is not valid"
+		}
+
+		#bind $target <Destroy> +[format {
+		#	if {[info object isa object %1$s]} {
+		#		try {
+		#			%2$s
+		#		} on error {errmsg options} {
+		#			puts stderr "Error destroying (%1$s): [dict get $options -errorinfo]"
+		#		}
+		#	}
+		#} [list [self]] [code destroy]]
+		bind $target <Destroy> +[list apply {
+			{obj} {
+				if {[info object isa object $obj]} {$obj destroy}
+			}
+		} [self]]
+
+		my configure -mode "and" {*}$configureargs
+		my configure -name "tlc::StateToggle internal [self] \"$name\""
+
+		my attach_output [code _stategate_update]
+	}
+
+	#>>>
+	destructor { #<<<
+		set deleting		1
+		my log debug "tlc::StateToggle ($target) ([self]) going away"
+		my detach_output [code _stategate_update]
+		if {[winfo exists $target]} {
+			#catch {
+			#	trace remove command $target delete [list [self] destroy]
+			#}
+		}
+	}
+
+	#>>>
+
+	method attach_signal {signal {a_sense normal}} {my attach_input $signal $a_sense}
+	method detach_signal {signal} {my detach_input $signal}
+	method force_update {} {my _stategate_update [my state]}
+	method target {} {set target}
+	method deleting {} {set deleting}
+	method explain {} { #<<<
+		set build	""
+		if {[info exists lasterror]} {
+			append build	"Last error configuring target: $lasterror" \n
+		}
+		append build [explain_txt]
+		return $build
+	}
+
+	#>>>
+
+	method _stategate_update {{newstate ""}} { #<<<
+		if {[info exists lasterror]} {unset lasterror}
+		if {$newstate ne ""} {
+			set stategate_state	$newstate
+		}
+		if {$explain} {
+			my log debug [my explain_txt]
+		}
+		set switchlist	{}
+		dict for {key values} $toggles {
+			lappend switchlist	$key [lindex $values $stategate_state]
+		}
+		if {$debugmode} {
+			my log debug "[self] Updating $target: ([state]) ($switchlist)"
+		}
+		try {
+			$target configure {*}$switchlist
+		} on error {errmsg options} {
+			set lasterror	$errmsg
+			my log error "\nError configuring $target: $errmsg\n[dict get $options -errorinfo]"
+		}
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+cflib::pclass create sop::domino {
+	superclass cflib::baselog
+
+	property name	""		_name_changed
+	property delay	"idle"
+
+	protected_property after_id	""
+	protected_property outputs	{}
+	protected_property inputs	[dict create]
+	protected_property lock		0
+
+	method _name_changed {} { #<<<
+		set baselog_instancename	$name
+	}
+
+	#>>>
+
+	constructor {accessvar args} { #<<<
+		my configure {*}$args
+
+		if {$name eq ""} {
+			my configure -name $accessvar
+		}
+
+		upvar $accessvar scopevar
+		set scopevar [self]
+		trace variable scopevar u [my code _scopevar_unset]
+	}
+
+	#>>>
+	destructor { #<<<
+		after cancel $after_id
+		foreach dom_obj [dict keys $inputs] {
+			my detach_input $dom_obj
+		}
+	}
+
+	#>>>
+
+	method tip {args} { #<<<
+		if {$lock > 0} return
+
+		if {$after_id ne ""} return
+		my _debug debug "tlc::Domino::tip: ([self]) ($name)"
+		set after_id	[after $delay [my code _tip_outputs]]
+	}
+
+	#>>>
+	method tip_now {args} { #<<<
+		my _tip_outputs
+	}
+
+	#>>>
+	method attach_output {handler} { #<<<
+		if {$handler ni $outputs} {
+			lappend outputs $handler
+			return 1
+		} else {
+			return 0
+		}
+	}
+
+	#>>>
+	method detach_output {handler} { #<<<
+		set idx		[lsearch $outputs $handler]
+		set outputs	[lreplace $outputs $idx $idx]
+	}
+
+	#>>>
+	method attach_input {dom_obj} { #<<<
+		if {![info object isa typeof $dom_obj sop::domino]} {
+			error "$dom_obj isn't a sop::domino"
+		}
+
+		dict set inputs $dom_obj	1
+
+		return [$dom_obj attach_output [my code tip]]
+	}
+
+	#>>>
+	method detach_input {dom_obj} { #<<<
+		if {![info object isa typeof $dom_obj sop::domino]} {
+			error "$dom_obj isn't a Domino"
+		}
+
+		dict unset inputs $dom_obj
+
+		return [$dom_obj detach_output [my code tip]]
+	}
+
+	#>>>
+	method pending {} { #<<<
+		expr {$after_id ne ""}
+	}
+
+	#>>>
+	method force_if_pending {} { #<<<
+		if {$after_id ne ""} {my tip_now}
+	}
+
+	#>>>
+	method cancel_if_pending {} { #<<<
+		if {$after_id ne ""} {
+			after cancel $after_id
+			set after_id	""
+		}
+	}
+
+	#>>>
+	method lock {} { #<<<
+		incr lock
+	}
+
+	#>>>
+	method unlock {} { #<<<
+		incr lock -1
+		if {$lock < 0} {
+			puts stderr "[self] lock went below zero!: $lock"
+		}
+	}
+
+	#>>>
+
+	method _debug {level msg} { #<<<
+#		invoke_handlers debug $level $msg
+	}
+
+	#>>>
+	method _tip_outputs {} { #<<<
+		after cancel $after_id
+		set after_id	""
+		foreach output $outputs {
+			try {
+				coroutine coro_domino_output_[incr ::coro_seq] {*}$output
+			} on error {errmsg options} {
+				my log error "\nerror updating output ($output):\n\t$errmsg\n[dict get $options -errorinfo]"
+			}
+		}
+	}
+
+	#>>>
+	method _scopevar_unset {args} { #<<<
+		my log debug
+		delete object [self]
+	}
+
+	#>>>
+}
+
+
+package provide cflib 1.13.0
 
 		namespace eval cflib {}
 	
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
+oo::class create cflib::handlers {
+	variable {*}{
+		allow_unregistered
+		handlers
+		afterids
+		processing_handlers
+		processing_stack
+	}
+
+	constructor {} { #<<<
+		set allow_unregistered	1
+		set handlers			[dict create]
+		set afterids			[dict create]
+		set processing_handlers	0
+		set processing_stack	{}
+
+		if {[self next] ne ""} next
+	}
+
+	#>>>
+	destructor { #<<<
+		if {[info exists afterids]} {
+			dict for {key val} $afterids {
+				after cancel $val
+				dict unset afterids $key
+			}
+		}
+		if {[self next] ne ""} next
+	}
+
+	#>>>
+
+	method register_handler {type handler} { #<<<
+		if {
+			![dict exists $handlers $type]
+			|| $handler ni [dict get $handlers $type]
+		} {
+			my _handlers_debug trivia "Registering handler ($type) ($handler)"
+			dict lappend handlers $type	$handler
+		}
+	}
+
+	#>>>
+	method deregister_handler {type handler} { #<<<
+		if {![dict exists $handlers $type]} return
+		set new	{}
+		foreach rhandler [dict get $handlers $type] {
+			if {$rhandler eq $handler} continue
+			lappend new $rhandler
+		}
+		#my log trivia "[self] Deregistering handler ($type) ($handler)"
+		dict set handlers $type	$new
+	}
+
+	#>>>
+	method handlers_available {type} { #<<<
+		return [expr {
+			[dict exists $handlers $type] &&
+			[llength [dict get $handlers $type]] >= 1}]
+	}
+
+	#>>>
+	method dump_handlers {} { #<<<
+		return $handlers
+	}
+
+	#>>>
+
+	method invoke_handlers {type args} { #<<<
+		if {![dict exists $handlers $type]} {
+			if {$allow_unregistered} {
+				return
+			} else {
+				error "[self]: No handlers found for type: ($type)"
+			}
+		}
+
+		set results	{}
+		if {$processing_handlers} {
+			my _handlers_debug debug "detected reentrant handling for ($type) stack: ($processing_stack)"
+		}
+		incr processing_handlers	1
+		lappend processing_stack	$type
+		set last_handler	""
+		try {
+			my _handlers_debug debug "entering processing of $type"
+			foreach handler [dict get $handlers $type] {
+				# Check if a previous handler removed this one <<<
+				if {
+					![dict exists $handlers $type] ||
+					$handler ni [dict get $handlers $type]
+				} {
+					my _handlers_debug debug "Skipping handler ($handler) which has just been removed (presumably by a previous handler in the list"
+					continue
+				}
+				# Check if a previous handler removed this one >>>
+				set pending_afterid	\
+						[after 3000 [namespace code [list my _throw_hissy_handler $handler $args]]]
+				set last_handler	$handler
+				dict set afterids invoke_handler_$handler	$pending_afterid
+				my _handlers_debug debug "Invoking callback for ($type): ($handler)"
+				#lappend results	[uplevel #0 $handler $args]
+				lappend results	[coroutine coro_handler_[incr ::coro_seq] {*}$handler {*}$args]
+				after cancel $pending_afterid
+				dict unset afterids	invoke_handler_$handler
+			}
+		} on ok {} {
+			incr processing_handlers	-1
+			set processing_stack		[lrange $processing_stack 0 end-1]
+			my _handlers_debug debug "leaving processing of $type"
+			return $results
+		} on error {errmsg options} {
+			incr processing_handlers	-1
+			set processing_stack		[lrange $processing_stack 0 end-1]
+			my _handlers_debug error "\nError processing handlers for ($type), in handler ($last_handler): $errmsg\n[dict get $options -errorinfo]"
+			dict incr options -level
+			return -options $options $errmsg
+		}
+	}
+
+	#>>>
+	method _debug {msg} { #<<<
+		my _handlers_debug debug $msg
+	}
+
+	#>>>
+	method _handlers_debug {lvl msg} { #<<<
+		# Override in derived class
+		switch -- $lvl {
+			warning -
+			error {
+				log error "cflib::handlers::handlers_debug([self]): $lvl $msg"
+			}
+		}
+	}
+
+	#>>>
+
+	method _throw_hissy_handler {handler arglist} { #<<<
+		log debug "\n\nHandlers::throw_hissy: obj: ([self]) taking way too long to complete invoke_handlers for handler: ($handler)\n\targs: ($arglist)\n\n"
+	}
+
+	#>>>
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> foldmarker=<<<,>>>
+
+oo::class create cflib::baselog {
+	method log {lvl {msg ""} args} {
+		puts "$msg"
+		#uplevel [string map [list %lvl% $lvl %msg% $msg %args% $args] {
+		#	puts "[self] [self class]::[self method] %lvl% %msg%"
+		#}]
+	}
+}
+
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
 proc cflib::readfile {fn {mode text}} {
+	set handle	[open $fn r]
 	try {
-		set fp	[open $fn r]
 		if {$mode eq "binary"} {
-			chan configure $fp \
+			chan configure $handle \
 					-translation binary \
 					-encoding binary
 		}
-		set dat	[read $fp]
-
-		return $dat
+		chan read $handle
 	} finally {
-		if {[info exists fp] && $fp in [chan names]} {
-			close $fp
-		}
+		chan close $handle
 	}
 }
 
@@ -461,6 +4354,9 @@ cflib::pclass create cflib::pclassbase {
 		if {[llength $args] > 1} {
 			error "Too many arguments, expecting name ?default_value?"
 		}
+		if {[string index $name 0] eq "-"} {
+			set name	[string range $name 1 end]
+		}
 		my variable _props
 		if {[dict exists $_props $name] && [dict get $_props $name protection] eq "public"} {
 			my variable $name
@@ -569,56 +4465,739 @@ proc cflib::intersect3 {list1 list2} {
 		}
 	}
 
+	list $firstonly $intersection $secondonly
+}
 
-	return [list $firstonly $intersection $secondonly]
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+oo::class create cflib::props {
+	method _properties {} {return {}}
+
+	constructor args {
+		if {[self next] ne ""} next
+
+		my _init_props $args
+	}
+
+	method _init_props {argv} {
+		my variable _propbase_initialized
+		if {![info exists _propbase_initialized]} {
+			cflib::config_lite create prop $argv [my _properties]
+
+			set _propbase_initialized	1
+		}
+	}
+
+	forward configure	prop configure
+	forward cget		prop cget
+}
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+# Based on http://rosettacode.org/wiki/Global_Singleton
+
+oo::class create cflib::singleton {
+	superclass oo::class
+
+	variable object
+
+	unexport create
+
+	method new {args} { #<<<
+		if {![info exists object]} {
+			set object	[next {*}$args]
+		}
+		return $object
+	}
+
+	#>>>
+}
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+# Handlers invoked:
+#	output(channel, data)	- When output arrives from the child, channel is
+#							  one of {stdout, stderr}
+#	reaped(result)			- When the child dies and has been reaped.  result
+#							  is the numeric result from the child.
+#	death_by_signal(childpid, sigal_name, msg)
+#							- When a child is killed by a signal.  signame
+#							  is something like SIGTERM, msg is something
+#							  like "software termination signal"
+
+oo::class create cflib::process {
+	uplevel #0 {package require sop}
+	superclass sop::signalsource cflib::handlers
+
+	variable {*}{
+		cmd
+		pids
+		res
+		handle
+		stderr_handle
+		buf
+		output_matches
+		dominos
+		signals
+		seq
+	}
+
+	constructor {args} { #<<<
+		set cmd	$args
+
+		array set dominos	{}
+		set output_matches	[dict create]
+		set pids			{}
+		set buf				{}
+		set seq				0
+
+		sop::signal new signals(running) -name "[self] running"
+		sop::signal new signals(finished) -name "[self] finished"
+		sop::domino new dominos(check_output_waits) -name "[self] check_output_waits"
+
+		if {[self next] ne ""} next
+
+		namespace path [concat [namespace path] {
+			::oo::Helpers::cflib
+		}]
+
+		set stderr_handle	[chan create write [code _stderr_handler]]
+
+		#set cmdline	[list {*}$cmd 2>@ $stderr_handle]
+		#set cmdline	[list {*}$cmd >@ $stderr_handle]
+		#set cmdline	[list {*}$cmd 2>@ stdout]
+		set cmdline	[list {*}$cmd 2>@1]
+		#set cmdline	[list {*}$cmd]
+		#puts $stderr_handle "hello, world"; flush $stderr_handle
+		set handle	[open |$cmdline r]
+		chan configure $handle \
+				-buffering none \
+				-blocking 0 \
+				-translation binary \
+				-encoding binary
+		set pids		[pid $handle]
+		chan event $handle readable [code _readable]
+		$signals(running) set_state 1
+
+		$dominos(check_output_waits) attach_output [code _check_output_waits]
+	}
+
+	#>>>
+	destructor { #<<<
+		try {
+			$signals(running) set_state 0
+		} on error {errmsg options} {
+			log error [dict get $options -errorinfo]
+		}
+		if {[info exists handle] && $handle in [chan names]} {
+			chan event $handle readable {}
+			try {
+				chan close $handle
+			} on error {errmsg options} {
+				log error [dict get $options -errorinfo]
+			}
+			unset handle
+		}
+		if {[info exists stderr_handle] && $stderr_handle in [chan names]} {
+			try {
+				chan close $stderr_handle
+			} on error {errmsg options} {
+				log error [dict get $options -errorinfo]
+			}
+			unset stderr_handle
+		}
+
+		if {$::tcl_platform(platform) eq "unix"} {
+			foreach pid $pids {
+				catch {exec kill -15 $pid}
+			}
+		}
+
+		my _abort_waits
+
+		if {[self next] ne ""} next
+	}
+
+	#>>>
+
+	method pids {} {set pids}
+	method cmd {} {set cmd}
+	method output {} { #<<<
+		set build	""
+		foreach chunk $buf {
+			lassign $chunk channel data
+			append build $data
+		}
+		return $build
+	}
+
+	#>>>
+	method stdout {} { #<<<
+		set build	""
+		foreach chunk $buf {
+			lassign $chunk channel data
+			if {$channel ne "stdout"} continue
+			append build $data
+		}
+		return $build
+	}
+
+	#>>>
+	method stderr {} { #<<<
+		set build	""
+		foreach chunk $buf {
+			lassign $chunk channel data
+			if {$channel ne "stderr"} continue
+			append build $data
+		}
+		return $build
+	}
+
+	#>>>
+	method result {} { #<<<
+		if {![$signals(finished) state]} {
+			error "Child yet lives"
+		}
+		return $res
+	}
+
+	#>>>
+	method waitfor_output {match {timeout_ms ""}} { #<<<
+		if {[string match "*$match*" $buf]} return
+
+		if {[info coroutine] eq ""} {
+			error "Can only wait in a coroutine context"
+		}
+		set waitid	[incr seq]
+		dict set output_matches $waitid coro [info coroutine]
+		dict set output_matches $waitid match $match
+		if {$timeout_ms ne ""} {
+			dict set output_matches $waitid afterid [after $timeout_ms \
+					[code _wait_timeout $waitid]
+		} else {
+			dict set output_matches $waitid afterid ""
+		}
+		lassign [yield] result options
+		return -options $options $result
+	}
+
+	#>>>
+	method _wait_timeout {waitid} { #<<<
+		set coro	[dict get $output_matches $waitid coro]
+		set match	[dict get $output_matches $waitid match]
+		set options	[dict create]
+		dict set options -code error
+		dict set options -errorcode [list timeout $match]
+		dict unset output_matches $waitid
+		after idle [list $coro [list "Timeout waiting for \"$match\"" $options]]
+	}
+
+	#>>>
+	method _readable {} { #<<<
+		set dat	[chan read $handle]
+		if {$dat ne ""} {
+			lappend buf [list stdout $dat]
+		}
+		if {[chan eof $handle]} {
+			try {
+				chan configure $handle -blocking 1
+				chan close $handle
+			} trap CHILDSTATUS {errmsg options} {
+				lassign [dict get $options -errorcode] - childpid res
+			} trap CHILDKILLED {errmsg options} {
+				lassign [dict get $options -errorcode] - childpid sig msg
+				my invoke_handlers death_by_signal $childpid $sig $msg
+				set res	""
+			} on error {errmsg options} {
+				log error "Child died in an interesting way: $errmsg ([dict get $options -errorcode])"
+				set res	""
+			} on ok {} {
+				set res	0
+			}
+			set pids		{}
+			unset handle
+
+			$dominos(check_output_waits) tip
+			my invoke_handlers output stdout $dat
+
+			$signals(running) set_state 0
+			$signals(finished) set_state 1
+			my _abort_waits
+			my invoke_handlers reaped $res
+			return
+		}
+
+		$dominos(check_output_waits) tip
+
+		my invoke_handlers output stdout $dat
+	}
+
+	#>>>
+	method _stderr_handler {subcmd channelId args} { #<<<
+		switch -- $subcmd {
+			initialize {
+				lassign $args mode
+				if {$mode ne "write"} {
+					error "Only writing is supported"
+				}
+				return {
+					initialize
+					finalize
+					watch
+
+					write
+					blocking
+				}
+			}
+
+			finalize {
+			}
+
+			watch {
+			}
+
+			write {
+				lassign $args data
+				lappend buf	[list stderr $data]
+				my invoke_handlers output stderr $data
+
+				$dominos(check_output_waits) tip
+
+				return [string length $data]
+			}
+
+			blocking {
+				lassign $args mode
+			}
+
+			default {
+				error "Unsupported subcommand: ($subcmd)"
+			}
+		}
+	}
+
+	#>>>
+	method _check_output_waits {} { #<<<
+		set plain	[my output]
+		dict for {waitid info} $output_matches {
+			set coro	[dict get $info coro]
+			set match	[dict get $info match]
+			if {[string match "*$match*" $plain]} {
+				after cancel [dict get $info afterid]
+				dict unset output_matches	$waitid
+				after idle [list $coro {"" {-code ok}}]
+			}
+		}
+	}
+
+	#>>>
+	method _abort_waits {} { #<<<
+		$dominos(check_output_waits) force_if_pending
+		dict for {waitid info} $output_matches {
+			set coro	[dict get $info coro]
+			set match	[dict get $info match]
+			after cancel [dict get $info afterid]
+			dict unset output_matches	$waitid
+			after idle [list $coro [list "child died while waiting for \"$match\"" [list -code error -errorcode [list child_died $match]]]]
+		}
+	}
+
+	#>>>
 }
 
 
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
 proc cflib::writefile {fn data {mode "text"}} {
+	set handle	[open $fn w]
 	try {
-		set fp	[open $fn w]
 		if {$mode eq "binary"} {
-			chan configure $fp \
+			chan configure $handle \
 					-translation binary \
 					-encoding binary
 		}
-		chan puts -nonewline $fp $data
+		chan puts -nonewline $handle $data
 	} finally {
-		if {[info exists fp] && $fp in [chan names]} {
-			close $fp
-		}
+		chan close $handle
 	}
 }
 
 
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> foldmarker=<<<,>>>
+# From http://wiki.tcl.tk/21595
 
-oo::class create cflib::baselog {
-	method log {lvl {msg ""} args} {
-		puts "$msg"
-		#uplevel [string map [list %lvl% $lvl %msg% $msg %args% $args] {
-		#	puts "[self] [self class]::[self method] %lvl% %msg%"
-		#}]
+namespace eval ::oo::Helpers::cflib {
+	proc code {method args} {
+		list [uplevel 1 {namespace which my}] $method {*}$args
 	}
+}
+# From http://wiki.tcl.tk/21595
+
+namespace eval ::oo::Helpers::cflib {
+	proc classvar {name args} {
+		set ns	[info object namespace [uplevel 1 {self class}]]
+		set vs	[list $name $name]
+		foreach v $args {
+			lappend vs $v $v
+		}
+		tailcall namespace upvar $ns {*}$vs
+	}
+}
+
+# Use like this:
+#oo::class create Foo {
+#	method bar {z} {
+#		cflib::classvar x y
+#		return [incr x $z],[incr y]
+#	}
+#}
+#
+# or:
+#
+#oo::class create Foo {
+#	constructor {} {
+#		namespace path [concat [namespace path] {::oo::Helpers::cflib}]
+#	}
+#	method bar {z} {
+#		classvar x y
+#		return [incr x $z],[incr y]
+#	}
+#}
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+# These routines should be DST (daylight savings time) compatible for dates
+# later than 2007
+
+# -office_hours format =========================================================
+# In BNF like language: (foo{n..m} means a Tcl list with [n,m] elements)
+# office_hours:		timespec{0..n}
+# timespec:			range SP times
+# SP:				\s+
+# range:			dow | (dow "-" dow)
+# dow:				"Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday" | "Sunday"	# or any case-insensitive unique prefix of at least 3 characters
+# times:			time_range{0..n}
+# time_range:		time SP time
+# time:				(tval meridian) | tval
+# tval:				hours | (hours ":" minutes) | (hours ":" minutes ":" seconds)
+# meridian:			"am" | "AM" | "pm" | "PM"
+# hours:			0 - 24		# or 0 - 12 if used with a meridian
+# minutes:			0 - 59
+# seconds:			0 - 59
+#
+# Some examples:
+#	"Thu {10:30am 4pm}"		- Only open on Thursdays from 10:30am till 4pm
+#	""						- Never open
+#	"Monday-Sun {00:00 24:00}"
+#							- Open 24/7
+#	"Wed {9am 5pm} Mon-Fri {8am 5pm} Sat {8:30am 11:30am}"
+#							- Open from 8am to 5pm on weekdays, except for Wednesday which is 8am to 5pm, and Saturday from 8:30am till 11:30am
+#	"Mon-Fri {8am 5pm} Wed {9am 5pm} Sat {8:30am 11:30am}"
+#							- Open from 8am to 5pm on weekdays, and Saturday from 8:30am till 11:30am.  Note that the first matching range is used, so in this case the special hours for Wednesday are ignored
+
+# -special_days ================================================================
+# special_days specifies a callback that is passed a day (given as seconds from
+# the unix epoch), and must return a value in one of the following forms:
+#	"normal"/<false>			- to signal normal rules from
+#									office_hours apply
+#	"holiday"/<true>			- to signal a holiday, ie. no work hours
+#	?start_time end_time?...	- a list of 0..n pairs of times, like the times
+#									portion of the office_hours setting
+
+oo::class create cflib::businesstime {
+	variable {*}{
+		dow_range_cache
+		office_hours_compiled
+		step_mode
+	}
+
+	constructor {args} { #<<<
+		if {[self next] ne ""} next
+
+		set dow_range_cache	{}
+
+		if {"::tcl::mathop" ni [namespace path]} {
+			namespace path [concat [namespace path] {
+				::tcl::mathop
+			}]
+		}
+
+		cflib::config_lite create cfg $args {
+			variable office_hours	{Mon-Fri {8am 5pm}}
+			variable special_days	{}
+		}
+	}
+
+	#>>>
+	method debug {debug} { #<<<
+		if {$debug} {
+			proc ?? script {uplevel #1 $script}
+		} else {
+			proc ?? args {}
+		}
+	}
+
+	#>>>
+	method _clear_caches {} { #<<<
+		set dow_range_cache	{}
+		unset -nocomplain office_hours_compiled
+	}
+
+	#>>>
+	method configure {args} { #<<<
+		my _clear_caches
+		tailcall cfg configure {*}$args
+	}
+
+	#>>>
+	forward cget cfg cget
+
+	method _compile_times {daystart times} { #<<<
+		if {[llength $times] % 2 != 0} {
+			error "Times must be a list of pairs of times like {8am 5pm} or {8am 11:30am 1pm 5pm}"
+		}
+		set offsets	{}
+		foreach time $times {
+			set offset	[- [clock scan $time -base $daystart] $daystart]
+			if {$offset == -1} {
+				# Special case for times like 24:00
+				set offset [- [clock add $daystart 1 day] $daystart]
+			}
+			lappend offsets	$offset
+		}
+		set offsets
+	}
+
+	#>>>
+	method _office_hours_compiled {} { #<<<
+		# DST safe: times are left text form, not resolved
+		if {![info exists office_hours_compiled]} {
+			set office_hours_compiled	{}
+			foreach {dow_range times} [cfg get office_hours] {
+				switch -regexp -matchvar m -- $dow_range {
+					^(.*?)-(.*)$ {
+						lassign $m - low high
+						set range_low	[clock format [clock scan $low] -format %w]
+						set range_high	[clock format [clock scan $high] -format %u]
+
+					}
+
+					default {
+						set range_low	[clock format [clock scan $dow_range] -format %u]
+						set range_high	[clock format [clock scan $dow_range] -format %u]
+					}
+				}
+
+				lappend office_hours_compiled $range_low $range_high $times
+			}
+		}
+		set office_hours_compiled
+	}
+
+	#>>>
+	method _normal_dow_range daystart { #<<<
+		set dow	[clock format $daystart -format %u]	;# Sunday == 7
+		if {![dict exists $dow_range_cache $dow]} {
+			set found	0
+			foreach {low high times} [my _office_hours_compiled] {
+				if {[<= $low $dow $high]} {
+					dict set dow_range_cache $dow $times
+					set found	1
+					break
+				}
+			}
+			if {!($found)} {
+				dict set dow_range_cache $dow {}
+			}
+		}
+		dict get $dow_range_cache $dow
+	}
+
+	#>>>
+	method _gaps daystart { #<<<
+		set gaps	{}
+
+		if {[cfg get special_days] eq {}} {
+			set special	normal
+		} else {
+			set special	[uplevel #0 [list {*}[cfg get special_days] $daystart]]
+		}
+		if {[string is boolean -strict $special]} {
+			set special	[expr {$special ? "holiday" : "normal"}]
+		}
+		switch -exact -- $special {
+			holiday	{set times	{}}
+			normal	{set times	[my _normal_dow_range $daystart]}
+			default	{set times	$special}
+		}
+
+		foreach {a b} [list \
+				0 \
+				{*}[my _compile_times $daystart $times] \
+				[- [clock add $daystart 1 day] $daystart] \
+		] {
+			lappend gaps \
+					[+ $daystart $a] \
+					[+ $daystart $b -1]
+		}
+
+		set gaps
+	}
+
+	#>>>
+	method offset {interval {from now}} { #<<<
+		if {$from eq "now"} {
+			set from	[clock seconds]
+		} else {
+			if {![string is digit -strict $from]} {
+				set from	[clock scan $from]
+			}
+		}
+		?? {log debug "Calculating ($interval) offset from \"[clock format $from]\""}
+
+		# Compute the interval manually rather than using clock add to avoid
+		# things like DST adjustments messing with the absolute interval value
+		if {![regexp {^\s*((?:\+|-)?[0-9]+(?:\.[0-9]+)?)\s+(.*?)s?\s*$} $interval - count units]} {
+			error "Cannot parse interval \"$interval\""
+		}
+		if {![string is double -strict $count]} {
+			error "Invalid count in interval, must be an integer"
+		}
+		set step_mode	seconds
+		switch -- $units {
+			second	{set remaining	$count}
+			minute	{set remaining	[* $count 60]}
+			hour	{set remaining	[* $count 3600]}
+			day {
+				# Tricky
+				set step_mode	days
+				set remaining	$count
+			}
+			week - month - year {
+				set from		[clock add $from $count $units]
+				set remaining	0
+			}
+
+			default {
+				error "Invalid unit in interval, should be one of {second minute hour day week month year} or their plural forms"
+			}
+		}
+
+		set remaining	[expr {int(ceil($remaining))}]
+
+		if {$remaining < 0} {
+			# TODO: some negative intervals might be useful - to calculate back
+			# from a future "from" for instance
+			# Could be done by setting some direction vectors used later in
+			# clock adds to step the pointer, and work out things like daystart
+			# (or dayend in the negative case)
+			error "Negative intervals not allowed"
+		}
+
+		set pointer	$from
+
+		?? {
+			log debug "units: $units\nremaining: $remaining $step_mode\npointer: \"[clock format $pointer]\""
+		}
+
+		while {1} {
+			set daystart	[clock scan 00:00:00 -base $pointer]
+			set gaps		[my _gaps $daystart]
+			?? {
+				log debug "-------------------------------------------------\nWhile loop iteration [incr _iter], pointer: \"[clock format $pointer]\"\n\tdaystart: \"[clock format $daystart]\"\n\tremaining: $remaining"
+				#foreach {a b} $gaps {
+				#	puts "\tgap \"[clock format $a]]\" - \"[clock format $b]\""
+				#}
+			}
+
+			if {$step_mode eq "days" && $remaining > 0} {
+				if {[llength $gaps] > 2} {
+					# gaps is a 2 element list if there are no business hours
+					# in this day
+					if {$pointer > [lindex $gaps end-1]} {
+						set pointer	[+ [lindex $gaps end] 1]
+						continue
+					} else {
+						incr remaining -1
+					}
+				}
+				set pointer	[clock add $pointer 1 day]
+				continue
+			}
+
+			foreach {gap_start gap_end} $gaps {
+				?? {
+					log debug "\t=== Processing gap \"[clock format $gap_start]\" - \"[clock format $gap_end]\""
+				}
+				if {$pointer + $remaining < $gap_start} {
+					?? {
+						log debug "\t\t-> Enough time remains before the start of the gap, advancing pointer \"[clock format $pointer]\" by $remaining seconds to \"[clock format [+ $pointer $remaining]]\" and calling it a day"
+					}
+					incr pointer	$remaining
+					set remaining	0
+					return $pointer
+				} elseif {$pointer < $gap_start} {
+					?? {
+						log debug "\t\t-> Pointer is before the next gap, advancing to gap_end+1: \"[clock format [+ $gap_end 1]]\", and reducing remaining by [- $gap_start $pointer] seconds to [- $remaining [- $gap_start $pointer]]"
+					}
+					incr remaining	-[- $gap_start $pointer]
+					set pointer		[+ $gap_end 1]
+				} elseif {$pointer <= $gap_end} {
+					?? {
+						log debug "\t\t-> Pointer is in the gap, advancing to gap_end+1"
+					}
+					set pointer		[+ $gap_end 1]
+				} else {
+					?? {
+						log debug "\t\t-> Pointer is beyond the gap_end, doing nothing"
+					}
+				}
+				?? {log debug "\t    <- Pointer \"[clock format $pointer]\""}
+			}
+		}
+	}
+
+	#>>>
+	method in_office_hours {{time now}} { #<<<
+		if {$time eq "now"} {
+			set time	[clock seconds]
+		} else {
+			if {![string is digit -strict $time]} {
+				set time	[clock scan $time]
+			}
+		}
+
+		set daystart	[clock scan 00:00:00 -base $time]
+		foreach {gap_start gap_end} [my _gaps $daystart] {
+			if {$time < $gap_start} {
+				return 1
+			} elseif {$time <= $gap_end} {
+				return 0
+			}
+		}
+		return 0
+	}
+
+	#>>>
 }
 
 
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
 oo::class create cflib::config {
+	superclass cflib::handlers
+
 	variable {*}{
 		definitions
 		cfg
 		rest
 	}
 
-	constructor {argv config} { #<<<
-		package require dsl
+	constructor {argv config {configfile ""}} { #<<<
+		if {[self next] ne ""} next
+
+		package require dsl 0.4
 		set cfg	[dict create]
 
-		set slave	[interp create -safe]
+		#set slave	[interp create -safe]
+		set slave	[my Interp]
 		try {
 			dsl::dsl_eval $slave {
 				variable {definitionsvar varname default} { #<<<
@@ -626,16 +5205,52 @@ oo::class create cflib::config {
 				}
 
 				#>>>
+				file {definitionsvar op args} { #<<<
+					switch -- $op {
+						normalize -
+						exists -
+						readable -
+						type -
+						dirname -
+						rootname -
+						extension -
+						tail -
+						join {
+							tailcall file $op {*}$args
+						}
+
+						default {
+							error "Method \"$op\" of file is not allowed"
+						}
+					}
+				}
+
+				#>>>
 			} $config [namespace which -variable definitions]
 		} finally {
-			if {[interp exists $slave]} {
+			if {$slave ne {} && [interp exists $slave]} {
 				interp delete $slave
 			}
 		}
 
+		if {$configfile ne "" && [file readable $configfile]} {
+			set cfg	[dict merge $cfg [dsl::decomment [cflib::readfile $configfile]]]
+		}
+
+		set rest	[my configure {*}$argv]
+	}
+
+	#>>>
+	method Interp {} {interp create -safe}
+	method configure args { #<<<
+		set thisrest	{}
+
 		set mode	"key"
-		set rest	{}
-		foreach arg $argv {
+		foreach arg $args {
+			if {$arg eq "--"} {
+				set mode	"forced_rest"
+				continue
+			}
 			switch -- $mode {
 				key {
 					if {[string index $arg 0] eq "-"} {
@@ -646,13 +5261,17 @@ oo::class create cflib::config {
 						}
 						set mode	"val"
 					} else {
-						lappend rest	$arg
+						lappend thisrest	$arg
 					}
 				}
 
 				val {
-					dict set cfg $key $arg
+					my set $key $arg
 					set mode	"key"
+				}
+
+				forced_rest {
+					lappend thisrest	$arg
 				}
 			}
 		}
@@ -662,6 +5281,14 @@ oo::class create cflib::config {
 				dict set cfg $k [dict get $definitions $k default]
 			}
 		}
+
+		set thisrest
+	}
+
+	#>>>
+	method cget param { #<<<
+		if {[string index $param 0] ne "-"} {error "Syntax error"}
+		my get [string range $param 1 end]
 	}
 
 	#>>>
@@ -690,15 +5317,359 @@ oo::class create cflib::config {
 	}
 
 	#>>>
+	method set {key newval} { #<<<
+		dict set cfg $key $newval
+		my invoke_handlers onchange,$key
+		set newval
+	}
+
+	#>>>
 	method rest {} { #<<<
 		return $rest
+	}
+
+	#>>>
+	method unknown {cmd args} { #<<<
+		if {[string index $cmd 0] eq "@"} {
+			switch -exact -- [llength $args] {
+				0 {dict get $cfg [string range $cmd 1 end]}
+				1 {my set [string range $cmd 1 end] [lindex $args 0]}
+				default {return -code error -level 2 "Wrong number of args, should be [self] $cmd ?newvalue?"}
+			}
+		} else {
+			next $cmd {*}$args
+		}
 	}
 
 	#>>>
 }
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
-proc cflib::in_tmp_dir {script} { #<<<
+# Expected Datasource schema:
+#	column 0:	ID
+#	column 1:	event_source_script
+
+# event_source_script must define a proc get_events {start_s end_s}
+# that returns a list of event descriptions, each a list of
+# {epoc_seconds event_data}
+# Example (generates hourly events on the hour):
+#
+# proc get_events {start_s end_s} {
+#	set events	{}
+#	set s	[expr {($start_s / 3600) * 3600}]
+#	while {$s < $end_s} {
+#		lappend events	[list $s [list the_posted_event_for $s]]
+#		incr s 3600
+#	}	
+#	return $events
+# }
+
+# Handers fired:
+#	event_fired(script_id, event_data)	- When a scheduled event fires
+
+cflib::pclass create cflib::scheduler {
+	superclass cflib::baselog cflib::handlers
+
+	property events_ds		""
+	property script_col		1
+	property window_days	1.0
+	property last_run_fn	""
+
+	variable {*}{
+		posted
+		afterids
+		refresh_afterid
+		current_horizon
+	}
+
+	constructor {args} { #<<<
+		set refresh_afterid		""
+
+		set posted		[dict create]
+		set afterids	[dict create]
+
+		my configure {*}$args
+
+		foreach reqf {events_ds} {
+			if {![info exists $reqf] || [set $reqf] == ""} {
+				error "Must set -$reqf"
+			}
+		}
+
+		if {
+			![info object isa object $events_ds] ||
+			![info object isa typeof $events_ds ds::datasource]
+		} {
+			error "-events_ds must be a ds::datasource or descendant"
+		}
+
+		if {
+			[info object isa typeof $events_ds ds::dschan] ||
+			[info object isa typeof $events_ds ds::datasource_filter]
+		} {
+			$events_ds register_handler new_item	[my code _new_item]
+			$events_ds register_handler change_item	[my code _change_item]
+			$events_ds register_handler remove_item	[my code _remove_item]
+			my _setup_events
+		} else {
+			$events_ds register_handler onchange	[my code _refresh]
+			my _setup_events
+		}
+	}
+
+	#>>>
+	destructor { #<<<
+		after cancel $refresh_afterid; set refresh_afterid	""
+
+		dict for {s afterid} $afterids {
+			after cancel $afterid
+		}
+		set afterids	{}
+
+		if {
+			[info exists events_ds] &&
+			[info object isa object $events_ds] &&
+			(
+				[info object isa typeof $events_ds ds::dschan] ||
+				[info object isa typeof $events_ds ds::datasource_filter]
+			)
+		} {
+			$events_ds deregister_handler new_item		[my code _new_item]
+			$events_ds deregister_handler change_item	[my code _change_item]
+			$events_ds deregister_handler remove_item	[my code _remove_item]
+			$events_ds deregister_handler init			[my code _setup_events]
+		}
+	}
+
+	#>>>
+
+	# Test framework helpers
+	method _test_pending_events {} { #<<<
+		set build	{}
+		foreach s [lsort -integer -increasing [dict keys $posted]] {
+			lappend build	$s [dict get $posted $s]
+		}
+		return $build
+	}
+
+	export _test_pending_events
+	#>>>
+
+	method _fire {s} { #<<<
+		if {[dict exists $afterids $s]} {
+			after cancel [dict get $afterids $s]
+			dict unset afterids $s
+		}
+		if {![dict exists $posted $s]} return
+
+		foreach event [dict get $posted $s] {
+			try {
+				my _process_event $event
+			} on error {errmsg options} {
+				my log error "error processing event: $errmsg\n[dict get $options -errorinfo]"
+			}
+		}
+		dict unset posted $s
+
+		my _update_last_run $s
+	}
+
+	#>>>
+	method _process_script {id script start_s end_s} { #<<<
+		set interp	[interp create -safe]
+
+		$interp alias remove_ev_source [my code _remove_ev_source $id]
+
+		try {
+			$interp eval $script
+			if {[$interp eval {expr {
+				[info commands get_events] eq "get_events"
+			}}]} {
+				set events	[$interp eval [list get_events $start_s $end_s]]
+			} else {
+				set events	{}
+				my log error "Event source $id does not define get_events proc"
+			}
+		} on error {errmsg options} {
+			my log error "Error initializing safe interpreter with script or calling get_events: $errmsg ([dict get $options -errorcode])\n[dict get $options -errorinfo]"
+		} on ok {} {
+			foreach event $events {
+				lassign $event s event_data
+
+				if {$s < $start_s || $s > $end_s} continue
+
+				dict lappend posted $s	[list $id $event_data]
+				if {![dict exists $afterids $s]} {
+					set delta	[expr {$s - [my _now]}]
+					if {$delta < 1} {
+						set delta	1
+					}
+					#my log debug "scheduling after for $delta seconds time (slot $s)"
+					dict set afterids $s	[after [expr {$delta * 1000}] \
+							[my code _fire $s]]
+				}
+			}
+		}
+
+		interp delete $interp
+	}
+
+	#>>>
+	method _process_event {event} { #<<<
+		lassign $event script_id event_data
+		my invoke_handlers event_fired $script_id $event_data
+	}
+
+	#>>>
+	method _setup_events {} { #<<<
+		after cancel $refresh_afterid; set refresh_afterid	""
+
+		set last_run	[my _get_last_run]
+
+		set end_s	[expr {[my _now] + int($window_days * 86400)}]
+		set current_horizon	$end_s
+		
+		set id_column	[$events_ds cget -id_column]
+		foreach row [$events_ds get_list {}] {
+			set script_id	[lindex $row $id_column]
+			my _new_item foo $script_id $row
+		}
+
+		set delta	[expr {($end_s - [my _now]) * 1000}]
+
+		set refresh_afterid	[after $delta [my code _refresh]]
+	}
+
+	#>>>
+	method _remove_ev_source {id} { #<<<
+		set now				[my _now]
+
+		dict for {s event} $posted {
+			set new_events	{}
+			foreach event $events {
+				set ev_script_id	[lindex $event 2]
+				if {$ev_script_id ne $id} {
+					lappend new_events $event
+				}
+			}
+
+			if {[llength $new_events] != [llength $events]} {
+				if {[llength $new_events] == 0} {
+					if {$s >= $now} {
+						after cancel $afterid
+						dict unset afterids $s
+						dict unset posted $s
+					}
+				} else {
+					dict set posted $s	$new_events
+				}
+			}
+		}
+	}
+
+	#>>>
+	method _update_last_run {{s now}} { #<<<
+		if {$last_run_fn eq ""} return
+
+		if {$s eq "now"} {
+			set s	[my _now]
+		}
+
+		set fp	[open $last_run_fn w]
+		try {
+			chan puts $fp $s
+		} finally {
+			chan close $fp
+		}
+	}
+
+	#>>>
+	method _refresh {} { #<<<
+		set now		[my _now]
+		my _update_last_run $now
+
+		dict for {s afterid} $afterids {
+			if {$s >= $now} {
+				after cancel $afterid
+				dict unset afterids $s
+				dict unset posted $s
+			}
+		}
+		my _setup_events
+	}
+
+	#>>>
+	method _get_last_run {} { #<<<
+		if {$last_run_fn eq ""} {
+			return [my _now]
+		}
+
+		try {
+			set fp	[open $last_run_fn r]
+		} on error {errmsg options} {
+			set last_run	""
+		} on ok {} {
+			set last_run	[chan read $fp]
+			chan close $fp
+		}
+
+		if {![string is integer -strict $last_run]} {
+			set last_run	[my _now]
+		}
+
+		return $last_run
+	}
+
+	#>>>
+	method _now {} { #<<<
+		clock seconds
+	}
+
+	#>>>
+
+	method _new_item {pool id data} { #<<<
+		set script	[lindex $data $script_col]
+		my _new_source $id $script
+	}
+
+	#>>>
+	method _change_item {pool id olddata newdata} { #<<<
+		set oldscript	[lindex $olddata 1]
+		set newscript	[lindex $newdata 1]
+		if {$oldscript eq $newscript} return
+		my _remove_ev_source $id
+		my _new_item $pool $id $newdata
+	}
+
+	#>>>
+	method _remove_item {pool id olddata} { #<<<
+		my _remove_ev_source $id
+	}
+
+	#>>>
+	method _new_source {id script} { #<<<
+		if {![info exists current_horizon]} {
+			error "current_horizon not defined"
+		}
+		set start_s	[my _now]
+		set end_s	$current_horizon
+
+		my _process_script $id $script $start_s $end_s
+	}
+
+	#>>>
+}
+
+
+namespace eval ::oo::Helpers::cflib {
+	proc scope {varname} {
+		join [list [uplevel 1 {namespace current}] $varname] ::
+	}
+}
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+proc cflib::in_tmp_dir {script {on_error ""}} { #<<<
 	set oldpwd	[pwd]
 	set tempfp	[file tempfile tmpdir]
 	close $tempfp
@@ -708,10 +5679,16 @@ proc cflib::in_tmp_dir {script} { #<<<
 	try {
 		uplevel $script
 	} on error {errmsg options} {
+		puts [dict get $options -errorinfo]
+		if {$on_error ne ""} {
+			try {
+				apply [list {errmsg options} $on_error] $errmsg $options
+			} on error {terrmsg toptions} {
+				puts stderr "Error in on_error script"
+			}
+		}
 		dict incr options -level
 		return -options $options $errmsg
-	} on ok {res} {
-		return $res
 	} finally {
 		cd $oldpwd
 		if {[info exists tmpdir] && [file exists $tmpdir]} {
@@ -722,147 +5699,215 @@ proc cflib::in_tmp_dir {script} { #<<<
 }
 
 #>>>
+# From http://wiki.tcl.tk/21595
+
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
-oo::class create cflib::handlers {
-	variable {*}{
-		allow_unregistered
-		handlers
-		afterids
-		processing_handlers
-		processing_stack
-	}
+oo::class create cflib::Static {
+	method static {args} {
+		if {![llength $args]} return
 
-	constructor {} { #<<<
-		set allow_unregistered	1
-		set handlers			[dict create]
-		set afterids			[dict create]
-		set processing_handlers	0
-		set processing_stack	{}
+		set callclass	[lindex [self caller] 0]
+		define $callclass self export varname
+		foreach vname $args {
+			lappend pairs	[$callclass varname $vname] $vname
+		}
+		uplevel 1 upvar {*}$pairs
 	}
+}
 
-	#>>>
-	destructor { #<<<
-		if {[info exists afterids]} {
-			dict for {key val} $afterids {
-				after cancel $val
-				dict unset afterids $key
+# Use like this:
+# oo::class create Foo {
+#	mixin cflib::Static
+#	variable _inst_num
+#
+#	constructor {} {
+#		my static _max_inst_num
+#		set _inst_num	[incr _max_inst_num]
+#	}
+#
+#	method inst {} {
+#		return $_inst_num
+#	}
+#}
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+
+oo::class create cflib::config_lite {
+	superclass cflib::config
+
+	method Interp {} {return {}}
+}
+# From http://wiki.tcl.tk/21595
+
+# Yikes.  But wow.
+
+namespace eval ::oo::define::cflib {
+	proc ensemble {name arglist bodyscript} {
+		if {[llength $name] == 1} {
+			tailcall method $name $arglist $bodyscript
+		}
+		set class	[info object namespace [lindex [info level -1] 1]]
+		set cmd		[lidnex $name end]
+		set ns		${class}::[join [lrange $name 0 end-1] ::]
+		if {$arglist ne {}} {
+			foreach a $arglist {
+				append init	[format {uplevel 2 [list set %1$s $%1$s]} $a]\n
 			}
-		}
-		if {[self next] ne {}} {next}
-	}
-
-	#>>>
-
-	method register_handler {type handler} { #<<<
-		if {
-			![dict exists $handlers $type]
-			|| $handler ni [dict get $handlers $type]
-		} {
-			my _handlers_debug trivia "Registering handler ($type) ($handler)"
-			dict lappend handlers $type	$handler
-		}
-	}
-
-	#>>>
-	method deregister_handler {type handler} { #<<<
-		if {![dict exists $handlers $type]} return
-		set idx	[lsearch [dict get $handlers $type] $handler]
-		#my log trivia "[self] Deregistering handler ($type) ($handler)"
-		dict set handlers $type	[lreplace [dict get $handlers $type] $idx $idx]
-	}
-
-	#>>>
-	method handlers_available {type} { #<<<
-		return [expr {
-			[dict exists $handlers $type] &&
-			[llength [dict get $handlers $type]] >= 1}]
-	}
-
-	#>>>
-	method dump_handlers {} { #<<<
-		return $handlers
-	}
-
-	#>>>
-
-	method invoke_handlers {type args} { #<<<
-		if {![dict exists $handlers $type]} {
-			if {$allow_unregistered} {
-				return
-			} else {
-				error "[self]: No handlers found for type: ($type)"
-			}
-		}
-
-		set results	{}
-		if {$processing_handlers} {
-			my _handlers_debug debug "detected reentrant handling for ($type) stack: ($processing_stack)"
-		}
-		incr processing_handlers	1
-		lappend processing_stack	$type
-		set last_handler	""
-		try {
-			my _handlers_debug debug "entering processing of $type"
-			foreach handler [dict get $handlers $type] {
-				# Check if a previous handler removed this one <<<
-				if {
-					![dict exists $handlers $type] ||
-					$handler ni [dict get $handlers $type]
-				} {
-					my _handlers_debug debug "Skipping handler ($handler) which has just been removed (presumably by a previous handler in the list"
-					continue
+			set body	[format {
+				%1$s
+				uplevel 2 {
+					try {
+						%2$s
+					} finally {
+						unset -nocomplain %3$s
+					}
 				}
-				# Check if a previous handler removed this one >>>
-				set pending_afterid	\
-						[after 3000 [namespace code [list my _throw_hissy_handler $handler $args]]]
-				set last_handler	$handler
-				dict set afterids invoke_handler_$handler)	$pending_afterid
-				my _handlers_debug debug "Invoking callback for ($type): ($handler)"
-				lappend results	[uplevel #0 $handler $args]
-				after cancel $pending_afterid
-				dict unset afterids	invoke_handler_$handler
-			}
-		} on ok {} {
-			incr processing_handlers	-1
-			set processing_stack		[lrange $processing_stack 0 end-1]
-			my _handlers_debug debug "leaving processing of $type"
-			return $results
-		} on error {errmsg options} {
-			incr processing_handlers	-1
-			set processing_stack		[lrange $processing_stack 0 end-1]
-			my _handlers_debug error "\nError processing handlers for ($type), in handler ($last_handler): $errmsg\n[dict get $options -errorinfo]"
-			dict incr options -level
-			return -options $options $errmsg
+			} $init $bodyscript $arglist]
+		} else {
+			set body	"uplevel 2 [list $bodyscript]"
 		}
-	}
-
-	#>>>
-	method _debug {msg} { #<<<
-		my _handlers_debug debug $msg
-	}
-
-	#>>>
-	method _handlers_debug {lvl msg} { #<<<
-		# Override in derived class
-		switch -- $lvl {
-			warning -
-			error {
-				puts stderr "cflib::handlers::handlers_debug([self]): $lvl $msg"
-			}
+		namespace eval $ns[list proc $cmd $arglist $body
+		for {set i 1} {$i < [llength $name]} {incr i} {
+			namespace eval $ns [list namespace export $cmd]
+			namespace eval $ns {namespace ensemble create}
+			set cmd	[namespace tail $ns]
+			set ns	[namespace qualifiers $ns]
 		}
+		set entry	[lindex $name 0]
+		tailcall method $entry {args} [format {
+			try {
+				namespace eval %s [list %s {*}$args]
+			} on ok {result} {
+				return $result
+			} on error {errmsg options} {
+				set pattern	{^(unknown or ambiguous subcommand ".*": must be)(.*)}
+				if {[regexp $pattern $result -> prefix cmds]} {
+					if {[self next] != {}} {
+						try {
+							next {*}$args
+						} on ok {nextResult} {
+							return $nextResult
+						} on error {errmsg options} {
+							if {[regexp $pattern $errmsg -> -> ncmds]} {
+								set all	[lsort -dict -uniq [regsub -all {, |, or |or } "$cmds $ncmds" { }]]
+								set fmt	[regsub {, ([[::graph::]]+)$} [join $all ", "] { or \1}]
+								return -code error "$prefix $fmt"
+							}
+							return -options $options $errmsg
+						}
+					}
+				}
+				return -options $options $errmsg
+				#return [namespace eval %s [list %s {*}$args]]
+			}
+		} $class $entry]
 	}
-
-	#>>>
-
-	method _throw_hissy_handler {handler arglist} { #<<<
-		puts stderr "\n\nHandlers::throw_hissy: obj: ([self]) taking way too long to complete invoke_handlers for handler: ($handler)\n\targs: ($arglist)\n\n"
-	}
-
-	#>>>
 }
 
 
+# Use like this:
+#
+#oo::class create Test {
+#	cflib::ensemble {e add} {a b} {
+#		return "$a + $b = [expr {$a + $b}]"
+#	}
+#
+#	cflib::ensemble {e self} {} {
+#		return "self is: [self]"
+#	}
+#
+#	cflib::ensemble {e calladd} {a b} {
+#		my e add $a $b
+#	}
+#
+#	cflib::ensemble {e x calladd} {a b} {
+#		my e add $a $b
+#	}
+#
+#	cflib::ensemble {e x y self} {} {
+#		return "self is: [self]"
+#	}
+#
+#	cflib::ensemble m0 {} {
+#		return "plain method"
+#	}
+#}
+#
+#oo::class create T2 {
+#	superclass Test
+#
+#	cflib::ensemble {e mul} {a b} {
+#		return "$a * $b = [expr {$a * $b}]"
+#	}
+#}
+#
+#oo::class create T3 {
+#	superclass T2
+#
+#	cflib::ensemble {e add} {a b} {
+#		return "$a + $b < [expr {$a + $b + 1}]"
+#	}
+#
+#	cflib::ensemble {e div} {a b} {
+#		return "$a / $b = [expr {$a / $b}]"
+#	}
+#}
+#
+#Test create t
+#T2 create t2
+#T3 create t3
+#
+#% t e add 1 2
+#1 + 2 = 3
+#% t e self
+#self is: ::t
+#% t e calladd 2 3
+#2 + 3 = 5
+#% t e x calladd 3 4
+#3 + 4 = 7
+#% t e x y self
+#self is: ::t
+#% t2 e mul 6 7
+#6 * 7 = 42
+#% t2 e add 8 9
+#8 + 9 = 17
+#% t3 e add 10 11
+#10 + 11 < 22
+#% t3 e boo
+#unknown or ambiguous subcommand "boo": must be add, calladd, div, error, mull, self or x
+namespace eval ::cflib::dict_bind_saved {}
+proc cflib::dict_bind {var cmd} {
+	upvar 1 $var dictvar
+	if {![info exists dictvar]} {error "\"$var\" doesn't exist"}
+
+	set ns	[uplevel 1 {namespace current}]
+	if {$ns eq "::"} {set ns ""}
+
+	set fqcmd	${ns}::$cmd
+
+	# If the bind command already exists, save it in to a temporary namespace
+	if {[info commands $fqcmd] ne ""} {
+		set saved_name	::cflib::dict_bind_saved::saved_cmd_[incr ::cflib::dict_bind_seq]
+		rename $fqcmd $saved_name
+	} else {
+		set saved_name	""
+	}
+
+	interp alias {} $fqcmd {} dict get [uplevel 1 [list set $var]]
+
+	trace add variable dictvar unset [list apply {
+		{fqcmd saved_name args} {
+			try {
+				rename $fqcmd {}
+				if {$saved_name ne ""} {
+					rename $saved_name $fqcmd
+				}
+			} on error {errmsg options} {
+				log error "Error restoring dict_bind state: [dict get $options -errorinfo]"
+			}
+		}
+	} $fqcmd $saved_name]
+}
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
 proc cflib::fullynormalize {fn} {
@@ -871,7 +5916,7 @@ proc cflib::fullynormalize {fn} {
 	set patience	20
 	set seen		{}
 	while {[file type $fqfn] eq "link"} {
-		set fqfn	[file normalize [file readlink $fqfn]]
+		set fqfn	[file normalize [file join [file dirname $fqfn] [file readlink $fqfn]]]
 		if {[incr patience -1] <= 0} {
 			error "Too many symlinks: $fn"
 		}
@@ -887,44 +5932,51 @@ proc cflib::fullynormalize {fn} {
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
 
 oo::class create cflib::refcounted {
+	variable {*}{
+		refcount
+		registry_var
+		keychain
+	}
+
 	constructor {} {
-		if {[self next] ne {}} {next}
+		set keychain	{}
+		if {[self next] ne ""} next
 		set refcount	1
 	}
 
 	destructor {
 		my _clear_registry
-		if {[self next] ne {}} {next}
+		if {[self next] ne ""} next
 	}
 
-	variable {*}{
-		refcount
-		registry_var
-	}
-
-	method object_registry {varname} { #<<<
+	method object_registry {varname args} { #<<<
 		my _clear_registry
 
 		set registry_var	$varname
 		upvar $registry_var var_ref
 
-		set var_ref		[self]
+		set keychain		$args
+		if {[llength $keychain] == 0} {
+			set var_ref		[self]
+		} else {
+			dict set var_ref {*}$keychain [self]
+		}
 	}
 
 	#>>>
 	method incref {args} { #<<<
-		set old		$refcount
+		?? {set old		$refcount}
 		incr refcount
-		my log_cmd debug "[self]: refcount $old -> $refcount ($args)"
+		?? {log debug "[self]: refcount $old -> $refcount ($args)"}
 	}
 
 	#>>>
 	method decref {args} { #<<<
-		set old		$refcount
+		?? {set old		$refcount}
 		incr refcount -1
-		my log_cmd debug "[self]: refcount $old -> $refcount ($args)"
+		?? {log debug "[self]: refcount $old -> $refcount ($args)"}
 		if {$refcount <= 0} {
-			my log_cmd debug "[self]: our time has come"
+			?? {log debug "[self]: our time has come"}
 			my destroy
 			return
 		}
@@ -932,17 +5984,35 @@ oo::class create cflib::refcounted {
 
 	#>>>
 	method refcount {} { #<<<
-		return $refcount
+		set refcount
+	}
+
+	#>>>
+	method bind_name {name} { #<<<
+		set ns	[uplevel 2 {namespace current}]
+		if {$ns eq "::"} {set ns	""}
+		set fqname	${ns}::$name
+		interp alias {} $fqname {} [self]
+		my incref "bound_name $name"
+		trace add command $fqname delete [namespace code [list my decref "bound_name $name"]]
+	}
+
+	#>>>
+	method additional_scoperef {desc} { #<<<
+		upvar 2 _cflib_refcounted_scoperef_[string map {:: //} [self]]_[incr ::cflib::scoperef] scopevar
+		set scopevar	[self]
+		my incref "manual scopevar $desc"
+		trace add variable scopevar unset [namespace code [list my decref "manual scopevar $desc unset"]]
 	}
 
 	#>>>
 
 	method log_cmd {lvl msg args} {}
 	method autoscoperef {} { #<<<
-		my log_cmd debug "[self class]::[self method] callstack: (callstack dump broken)"
+		#my log_cmd debug "[self class]::[self method] callstack: (callstack dump broken)"
 		upvar 2 _cflib_refcounted_scoperef_[string map {:: //} [self]] scopevar
 		set scopevar	[self]
-		trace variable scopevar u [namespace code {my decref "scopevar unset"}]
+		trace add variable scopevar {unset} [namespace code {my decref "scopevar unset"}]
 	}
 
 	#>>>
@@ -950,7 +6020,15 @@ oo::class create cflib::refcounted {
 		if {[info exists registry_var]} {
 			upvar $registry_var old_registry
 			if {[info exists old_registry]} {
-				unset old_registry
+				if {[llength $keychain] == 0} {
+					unset old_registry
+				} else {
+					try {
+						dict unset old_registry {*}$keychain
+					} on error {errmsg options} {
+						puts stderr "Could not remove object registry entry: $errmsg"
+					}
+				}
 			}
 		}
 	}
@@ -1708,1219 +6786,222 @@ proc sugar::tailrec_convert_calls {name arglist code} {
     }
     return $code
 }
-sugar-0.1.tm {F 20898 20898} cflib-1.2.tm {F 16002 36900} rpm-0.1.tm {F 4606 41506}tcl {D 83 83}#!/usr/bin/env cfkit8.6
-
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
-
-set dir	[pwd]
-
-package require cflib
-package require platform
-package require rpm
-
-namespace eval cflib {
-	namespace export *
-}
-namespace import cflib::*
-
-proc fail {msg} { #<<<
-	puts stderr $msg
-	exit 1
-}
-
-#>>>
-proc getkey {dict key args} { #<<<
-	if {[llength $args] > 1} {
-		throw {syntax} "Too many arguments, expecting dict key ?default?"
-	}
-	if {[dict exists $dict $key]} {
-		return [dict get $dict $key]
-	}
-	if {[llength $args] == 1} {
-		return [lindex $args 0]
-	}
-	set choices	[join [dict keys $dict] "\", \""]
-	throw [list invalid_key $key] "Invalid key: \"$key\", choose from \"$choices\""
-}
-
-#>>>
-proc decomment {in} { #<<<
-	set out	""
-
-	foreach line [split $in \n] {
-		if {[string index [string trim $line] 0] eq "#"} continue
-		append out	$line "\n"
-	}
-
-	return $out
-}
-
-#>>>
-proc dsl_eval {interp dsl_commands dsl_script args} { #<<<
-	set aliases_old	{}
-	foreach {cmdname cmdargs cmdbody} [decomment $dsl_commands] {
-		dict set aliases_old $cmdname [$interp alias $cmdname]
-
-		$interp alias $cmdname apply [list $cmdargs $cmdbody] {*}$args
-	}
-
-	try {
-		$interp eval $dsl_script
-	} finally {
-		dict for {cmdname oldalias} $aliases_old {
-			$interp alias $cmdname $oldalias
-		}
-	}
-}
-
-#>>>
-
-# Build tbuildconf <<<
-set tbuildconf [dict create \
-	projfile			tbuild.proj \
-	tm_build			tm \
-	repo_base			[file join $::env(HOME) .tbuild repo] \
-	default_runtime		kbskit* \
-	default_platform	linux-glibc2.3-ix86 \
-]
-
-foreach file [list \
-		[file join / etc tbuild.conf] \
-		[file join $env(HOME) .tbuild config] \
-		[file join $dir .tbuild config] \
-] {
-	if {[file exists $file] && [file   readable $file]} {
-		set tbuildconf	[dict merge $tbuildconf [readfile $file]]
-	}
-}
-# Build tbuildconf >>>
-
-oo::object create actions
-oo::objdefine actions {
-	method build {name args} { #<<<
-		global projinfo
-		my _load_projfile
-
-		if {$name eq "all"} {
-			set targets {}
-
-			foreach {category target} [my _targets] {
-				my build $target {*}$args
-			}
-			return
-		}
-
-		set istm	[dict exists $projinfo tms $name]
-		set ispkg	[dict exists $projinfo pkgs $name]
-		set isapp	[dict exists $projinfo applications $name]
-
-		if {!($istm || $ispkg || $isapp)} {
-			fail "Target \"$name\" is not a tm, package or application"
-		}
-
-		if {$istm} {
-			my _build_tm $name {*}$args
-		}
-		
-		if {$ispkg} {
-			puts "would build pkg \"$name\""
-		}
-
-		if {$isapp} {
-			my _build_application $name {*}$args
-		}
-	}
-
-	#>>>
-	method _build_tm {name args} { #<<<
-		global projinfo
-		my _load_projfile
-
-		dict with projinfo tms $name {}
-
-		set tm_data	""
-
-		append tm_data	[list package provide $name $version] "\n"
-
-		if {[info exists requires]} {
-			foreach req $requires {
-				append tm_data [list package require {*}$req] "\n"
-			}
-		}
-
-		if {[info exists init]} {
-			append tm_data $init "\n"
-		}
-
-		foreach file $files {
-			set file_data	[readfile $file]
-			append tm_data $file_data
-			if {[string index $file_data end] ne "\n"} {
-				append tm_data "\n"
-			}
-		}
-
-		set out_fn_base	[dict get $::tbuildconf tm_build]
-
-		set target_platforms	[dict keys $platforms]
-		if {[llength $target_platforms] == 0} {
-			fail "No platforms specified"
-		}
-
-		foreach platform $target_platforms {
-			set tm_name		${name}-$version.tm
-			set out_fn_dir	[file dirname [file join $out_fn_base $platform $tm_name]]
-			set out_fn	[file join $out_fn_dir [file tail ${name}-$version.tm]]
-
-			if {![file exists $out_fn_dir]} {
-				file mkdir $out_fn_dir
-			}
-			if {"-compress" in $args} {
-				set oldsize	[string length $tm_data]
-				set compressed [string map [list "\u001a" "\\u001a"] [zlib deflate $tm_data 3]]
-				set tm_data	[list eval zlib inflate $compressed]
-				set newsize	[string length $tm_data]
-				puts "Compressed $tm_name $oldsize -> $newsize"
-			}
-			writefile $out_fn $tm_data
-			puts "Wrote \"$out_fn\""
-		}
-	}
-
-	#>>>
-	method _build_application {name args} { #<<<
-		global projinfo
-		my _load_projfile
-
-		set appsettings	[dict get $projinfo applications $name]
-
-		dict for {platform platformsettings} [dict get $appsettings platforms] {
-			set before	[pwd]
-			my _in_tmp_dir {
-				file mkdir $name.vfs
-
-				# main.tcl <<<
-				set tokens	[dict create]
-				if {[dict exists $appsettings choose_package]} {
-					dict set tokens %choose_package% \
-							[list [dict get $appsettings choose_package]]
-				} else {
-					dict set tokens %choose_package% [list [list return $name]]
-				}
-
-				set main.tcl_data [string map $tokens {
-if {[catch {
-	package require starkit
-}]} {
-	set have_starkit	0
-} else {
-	set have_starkit	1
-}
-package require platform
-
-apply {
-	{} {
-		set here	[file dirname [info script]]
-		foreach platform [platform::patterns [platform::identify]] {
-			set pkgpath	[file join $here pkg $platform]
-			set tmpath	[file join $here tm $platform]
-			if {[file exists $pkgpath] && [file isdirectory $pkgpath]} {
-				lappend ::auto_path $pkgpath
-			}
-			if {[file exists $tmpath] && [file isdirectory $tmpath]} {
-				::tcl::tm::path add $tmpath
-			}
-		}
-	}
-}
-
-if {$have_starkit && [starkit::startup] eq "sourced"} return
-
-try {
-	package require app-[apply {{argv} %choose_package%} $argv]
-} on error {errmsg options} {
-	puts stderr "$errmsg\n[dict get $options -errorinfo]"
-}
-}]
-
-				writefile [file join $name.vfs main.tcl] [set main.tcl_data]
-				# main.tcl >>>
-
-				set app_base	[file join $name.vfs pkg tcl app-$name]
-				file mkdir $app_base
-
-				# _init.tcl <<<
-				if {[dict exists $appsettings entrypoint]} {
-					set entrypoint	[dict get $appsettings entrypoint]
-				} else {
-					set entrypoint	[lindex [dict get $appsettings files] 0]
-				}
-				if {$entrypoint ni [dict get $appsettings files]} {
-					error "Invalid file specified as entrypoint: \"$entrypoint\""
-				}
-
-				set _init.tcl_data		{}
-				set include_packages	{}
-				foreach req [dict get $appsettings requires] {
-					lappend _init.tcl_data	[list package require {*}$req]
-					lappend include_packages $req
-				}
-				if {[dict exists $platformsettings requires]} {
-					foreach req [dict get $platformsettings requires] {
-						puts stderr "Adding specific platform require: ($req) for $platform"
-						lappend _init.tcl_data	[list package require {*}$req]
-						lappend include_packages $req
-					}
-				}
-				lappend _init.tcl_data [list package provide app-$name [dict get $appsettings version]]
-				lappend _init.tcl_data "source \[file join \[file dirname \[info script\]\] [list $entrypoint]]"
-
-				writefile [file join $app_base _init.tcl] \
-						[join [set _init.tcl_data] "\n"]
-				# _init.tcl >>>
-
-				# app pkgIndex.tcl <<<
-				set pkgIndex.tcl_data	[string map [dict create \
-						%name%		[list app-$name] \
-						%version%	[list [dict get $appsettings version]] \
-				] {package ifneeded %name% %version% [list source [file join $dir _init.tcl]]
-				}]
-
-				writefile [file join $app_base pkgIndex.tcl] [set pkgIndex.tcl_data]
-				# app pkgIndex.tcl >>>
-
-				# Copy specified application files <<<
-				foreach file [dict get $appsettings files] {
-					set src_fn	[file join $before $file]
-					if {![file exists $src_fn]} {
-						error "Specified file doesn't exist: \"$file\""
-					}
-					if {![file readable $src_fn]} {
-						error "Specified file isn't readable: \"$file\""
-					}
-					set parts	[file split $file]
-					if {[lindex $parts 0] eq "/"} {
-						error "Absolute paths not allowed for files: \"$file\""
-					}
-					if {".." in $parts} {
-						error "Cannot have \"..\" in file specification: \"$file\""
-					}
-					set file_dest	[file join $app_base $file]
-					set file_dir	[file dirname $file_dest]
-					if {![file exists $file_dir]} {
-						file mkdir $file_dir
-					}
-					set file_contents	[readfile $src_fn binary]
-					writefile $file_dest $file_contents binary
-				}
-				# Copy specified application files >>>
-
-				if {[dict exists $appsettings runtime]} {
-					set runtime		[dict get $appsettings runtime]
-				} else {
-					set runtime		[dict get $::tbuildconf default_runtime]
-				}
-
-				if {$platform eq "tcl"} {
-					set runtime_platform	[dict get $::tbuildconf default_platform]
-				} else {
-					set runtime_platform	$platform
-				}
-
-				lassign [my _select_runtime $runtime $runtime_platform] \
-						runtime_name \
-						runtime_version \
-						runtime_path \
-						runtime_info
-
-				set ::package_manifest [dict get $runtime_info builtin_packages]
-
-				set compatible_platforms	[platform::patterns $platform]
-				dict for {fn data} [my _resolve_packages $include_packages $compatible_platforms] {
-					puts stderr "transcribing file ($fn)"
-					set fqfn	[file join $name.vfs $fn]
-					set dir		[file dirname $fqfn]
-					if {![file exists $dir]} {
-						file mkdir $dir
-					}
-					writefile $fqfn $data binary
-				}
-
-				unset ::package_manifest
-
-				set out_app_base	[file join [dict get $::tbuildconf repo_base] apps $platform]
-				if {![file exists $out_app_base]} {
-					file mkdir $out_app_base
-				}
-				set app_name		[file join $out_app_base $name]
-				set app_name_static	[file join $out_app_base ${name}-static]
-				if {"starkit" in [dict get $runtime_info builtin_packages]} {
-					puts "Writing application \"$app_name\""
-					exec -- sdx wrap $app_name -vfs $name.vfs -interp [file tail $runtime_path]
-					if {$platform ne "tcl"} {
-						puts "Writing application \"$app_name_static\""
-						exec -- sdx wrap $app_name_static -vfs $name.vfs -runtime $runtime_path
-					}
-				} elseif {"trofs" in [dict get $runtime_info builtin_packages]} {
-					package require trofs
-
-					set header	""
-					append header	"#!/bin/sh\n"
-					append header	"# \\\n"
-					append header	[string map [list %r $runtime_name] {exec "%r" "$0" ${1+"$@"}}] "\n"
-					append header \
-{
-package require trofs
-set top		[trofs::mount [info script]]
-set main	[file join $top main.tcl]
-if {![file exists $main]} {
-	puts stderr "No main.tcl"
-	exit 1
-}
-source $main
-}
-					cflib::writefile $app_name $header
-					trofs::archive $name.vfs $app_name
-
-					if {$::tcl_platform(platform) eq "unix"} {
-						file attributes $app_name -permissions rwxr-xr-x
-					}
-
-					if {$platform ne "tcl"} {
-						# TODO: merge $name.vfs with boot trofs
-					}
-				}
-			}
-		}
-
-		if {[dict exists $platformsettings rpm]} {
-			if {[info exists rpm]} {unset rpm}
-			dict set platformsettings rpm name $name
-			if {![dict exists $platformsettings rpm version]} {
-				dict set platformsettings rpm version [dict get $appsettings version]
-			}
-			if {![dict exists $appsettings summary]} {
-				error "Require summary to be defined to build an rpm"
-			}
-			if {![dict exists $appsettings description]} {
-				error "Require description to be defined to build an rpm"
-			}
-			dict set platformsettings rpm summary [dict get $appsettings summary]
-			dict set platformsettings rpm description [dict get $appsettings description]
-			set reqs	[dict get $platformsettings rpm requires]
-			switch -glob -- $runtime {
-				"*cfkit*" {
-					lappend reqs	"cfkit"
-				}
-
-				"*kbskit*" {
-					lappend reqs	"kbskit"
-				}
-			}
-			dict set platformsettings rpm requires [lsort -unique $reqs]
-			array set rpm [dict get $platformsettings rpm]
-			puts "rpm settings:"
-			parray rpm
-			unset rpm
-			set files	[list $app_name [file join / usr bin [file tail $app_name]]]
-			if {[dict exists $platformsettings rpm files]} {
-				lappend files {*}[dict get $platformsettings rpm files]
-			}
-			puts "files:\n[join $files \n]"
-			rpm::make_rpm [dict get $platformsettings rpm] $files [dict get $platformsettings rpm target]
-		}
-	}
-
-	#>>>
-	method _select_runtime {runtime platform} { #<<<
-		set candidates	{}
-		foreach compatplat [platform::patterns $platform] {
-			set runtime_base	[file join [dict get $::tbuildconf repo_base] runtimes $compatplat]
-			foreach candidate [glob -nocomplain -type f [file join $runtime_base info *]] {
-				set info	[readfile $candidate]
-				set simplename	[file tail $candidate]
-				if {[string match $runtime $simplename]} {
-					lappend candidates [list \
-							[file tail $candidate] \
-							[dict get $info builtin_packages Tcl] \
-							[file join $runtime_base bin $simplename] \
-							$info \
-					]
-				}
-			}
-		}
-
-		if {[llength $candidates] == 0} {
-			error "No suitable runtime found matching \"$runtime\" for platform \"$platform\""
-		}
-
-		set ordered	[lsort \
-				-index 1 \
-				-decreasing \
-				-command [list package vcompare] \
-				$candidates]
-
-		return [lindex $ordered 0]
-	}
-
-	#>>>
-	method _resolve_packages {required compatible_platforms} { #<<<
-		set file_list	[dict create]
-		foreach req $required {
-			puts stderr "Resolving requirement: ($req)"
-			set rest	[lassign $req pkgname]
-			if {
-				[dict exists $::package_manifest $pkgname] &&
-				([llength $rest] == 0 ||
-				[package vsatisfies [dict get $::package_manifest $pkgname] {*}$rest])
-			} continue
-
-			set available	[my _find_compatible $req $compatible_platforms]
-			try {
-				foreach candidate $available {
-					lassign $candidate ver type path
-
-					if {$type eq "tm"} { #<<<
-						set sub_requires	[my _extract_tm_requires $path]
-						set sub_file_list	[my _resolve_packages $sub_requires $compatible_platforms]
-						set file_list	[dict merge \
-								$file_list \
-								$sub_file_list \
-						]
-						set path_rel	[my _strip_base [dict get $::tbuildconf repo_base] $path]
-
-						dict set file_list $path_rel [readfile $path binary]
-						dict set ::package_manifest $pkgname $ver
-						throw {found} ""
-						#>>>
-					} elseif {$type eq "pkg"} { #<<<
-						foreach file [my _list_files_recursive $path] {
-							puts "Addling file ($file)"
-							set file_rel	[my _strip_base [dict get $::tbuildconf repo_base] $file]
-							dict set file_list $file_rel [readfile $file binary]
-						}
-						dict set ::package_manifest $pkgname $ver
-						throw {found} ""
-						#>>>
-					} else { #<<<
-						error "Cannot deal with package type: \"$type\""
-						#>>>
-					}
-				}
-				throw {not_found} ""
-			} trap {found} {} {
-				continue
-			} trap {not_found} {} {
-				error "No suitable candidates found for requirement \"$req\""
-			}
-		}
-
-		return $file_list
-	}
-
-	#>>>
-	method _strip_base {base path} { #<<<
-		set fqfn_base	[fullynormalize $base]
-		set fqfn_path	[fullynormalize $path]
-		set baselen	[string length $fqfn_base]
-		set prefix	[string range $fqfn_path 0 $baselen-1]
-		if {$prefix ne $fqfn_base} {
-			puts "fqfn_base: ($fqfn_base)"
-			puts "fqfn_path: ($fqfn_path)"
-			error "\"$path\" isn't contained in \"$base\""
-		}
-		string range $fqfn_path $baselen+1 end
-	}
-
-	#>>>
-	method _extract_tm_requires {path} { #<<<
-		set requires	{}
-		package require sugar
-		foreach cmdraw [sugar::scriptToList [readfile $path]] {
-			set cmd	{}
-			foreach token $cmdraw {
-				lassign $token type val
-
-				if {$type eq "TOK"} {
-					lappend cmd $val
-				}
-			}
-
-			if {[lrange $cmd 0 1] eq [list package require]} {
-				set rest	[lassign [lrange $cmd 2 end] name]
-				puts stderr "detected requirement for \"$name\" \"$rest\" from \"$path\""
-				lappend requires	[lrange $cmd 2 end]
-			}
-		}
-
-		return $requires
-	}
-
-	#>>>
-	method _list_files_recursive {base} { #<<<
-		# TODO: defend against circular links
-		set entries	{}
-
-		foreach ent [glob -type f -nocomplain [file join $base *]] {
-			lappend entries $ent
-		}
-
-		foreach ent [glob -type d -nocomplain [file join $base *]] {
-			lappend entries {*}[my _list_files_recursive $ent]
-		}
-
-		return $entries
-	}
-
-	#>>>
-	method _find_compatible {req compatible_platforms} { #<<<
-		set available	{}
-
-		set rest	[lassign $req pkgname]
-		set pkgpath	[string map [list :: /] $pkgname]
-		set tm_pkg		[file tail $pkgpath]
-		set tm_prefix	[file dirname $pkgpath]
-
-		set repo_base	[dict get $::tbuildconf repo_base]
-
-		# Look for tm
-		foreach plat $compatible_platforms {
-			if {$tm_prefix ne "."} {
-				set tm_path		[file join $repo_base tm $plat $tm_prefix]
-			} else {
-				set tm_path		[file join $repo_base tm $plat]
-			}
-			foreach match [glob -nocomplain -type f [file join $tm_path $tm_pkg-*.tm]] {
-				if {![regexp {^([[:alpha:]][:[:alnum:]]*)-([[:digit:]].*)\.tm$} [file tail $match] -> name version]} continue
-				if {
-					[llength $rest] == 0 ||
-					[package vsatisfies $version {*}$rest]
-				} {
-					lappend available [list $version tm $match]
-				}
-			}
-		}
-
-		# Look for package
-		foreach plat $compatible_platforms {
-			set pkg_path		[file join $repo_base pkg $plat]
-			foreach pkgIndex [glob -nocomplain -type f [file join $pkg_path * pkgIndex.tcl]] {
-				package require sugar
-				foreach cmdraw [sugar::scriptToList [readfile $pkgIndex]] {
-					set cmd	{}
-					foreach token $cmdraw {
-						lassign $token type val
-						if {$type eq "TOK"} {
-							lappend cmd $val
-						}
-					}
-
-					if {[lrange $cmd 0 2] eq [list package ifneeded $pkgname]} {
-						set offered_version	[lindex $cmd 3]
-						if {
-							[llength $rest] == 0 ||
-							[package vsatisfies $offered_version {*}$rest]
-						} {
-							lappend available	[list $offered_version pkg [file dirname $pkgIndex]]
-						}
-					}
-				}
-			}
-		}
-
-		return [lsort -unique -decreasing -command [list apply {
-			{a b} {
-				set aver	[lindex $a 0]
-				set bver	[lindex $b 0]
-				set sort	[package vcompare $aver $bver]
-				if {$sort == 0} {
-					# As a version tie-breaker, prefer tm over pkg
-					set atype	[lindex $a 1]
-					set btype	[lindex $b 1]
-					if {$atype eq $btype} {
-						return 0
-					} elseif {$atype eq "tm" && $btype ne "tm"} {
-						return 1
-					} elseif {$atype ne "tm" && $btype eq "tm"} {
-						return -1
-					}
-				}
-				return $sort
-			}
-		}] $available]
-	}
-
-	#>>>
-	method _refresh_build {name} { #<<<
-		# TODO: determine if target $name needs to be rebuilt
-		my build $name
-	}
-
-	#>>>
-	method clean {} { #<<<
-	}
-
-	#>>>
-	method install {args} { #<<<
-		global projinfo
-		my _load_projfile
-
-		if {[llength $args] == 0 || "all" in $args} {
-			foreach {category target} [my _targets] {
-				my _install_$category $target
-			}
-			return
-		}
-
-		foreach name $args {
-			set istm	[dict exists $projinfo tms $name]
-			set ispkg	[dict exists $projinfo pkgs $name]
-			set isapp	[dict exists $projinfo applications $name]
-
-			if {!($istm || $ispkg || $isapp)} {
-				fail "No target called \"$name\""
-			}
-
-			if {$istm} {my _install_tm $name}
-			if {$ispkg} {my _install_pkg $name}
-			if {$isapp} {my _install_app $name}
-		}
-	}
-
-	#>>>
-	method _install_tm {name} { #<<<
-		global projinfo
-
-		my _refresh_build $name
-		dict with projinfo tms $name {
-			set src_fn_base	[dict get $::tbuildconf tm_build]
-			set dst_fn_base	[file join [dict get $::tbuildconf repo_base] tm]
-
-			set target_platforms	[dict keys $platforms]
-			if {[llength $target_platforms] == 0} {
-				fail "No platforms specified"
-			}
-
-			foreach platform $target_platforms {
-				set tm_name	${name}-$version.tm
-				set src_fn	[file join \
-						$src_fn_base \
-						$platform \
-						$tm_name \
-				]
-				if {![file exists $src_fn]} {
-					puts stderr "WARNING: Expecting \"$src_fn\" but it wasn't built"
-					continue
-				}
-
-				set dst_fn_dir	[file dirname [file join $dst_fn_base $platform $tm_name]]
-				if {![file exists $dst_fn_dir]} {
-					file mkdir $dst_fn_dir
-				}
-
-				try {
-					file copy -force $src_fn $dst_fn_dir
-					puts "Installed tm $name in $dst_fn_dir"
-				} on error {errmsg options} {
-					fail "Error installing tm $name: $errmsg"
-				}
-			}
-		}
-	}
-
-	#>>>
-	method _install_pkg {name} { #<<<
-		global projinfo
-
-		dict with $projinfo 
-	}
-
-	#>>>
-	method _install_app {name} { #<<<
-	}
-
-	#>>>
-	method remove {} { #<<<
-	}
-
-	#>>>
-	method path {args} { #<<<
-		set paths		{}
-
-		# Apps
-		set basepath	[file join [dict get $::tbuildconf repo_base] apps]
-		foreach platform [platform::patterns [platform::identify]] {
-			# TODO: figure out how to quote spaces and other nasties
-			set path		[file join $basepath $platform]
-			if {"-all" in $args || [file isdirectory $path]} {
-				lappend paths	[file nativename $path]
-			}
-		}
-
-		# Runtimes
-		set basepath	[file join [dict get $::tbuildconf repo_base] runtimes]
-		foreach platform [platform::patterns [platform::identify]] {
-			# TODO: figure out how to quote spaces and other nasties
-			set path		[file join $basepath $platform bin]
-			if {"-all" in $args || [file isdirectory $path]} {
-				lappend paths	[file nativename $path]
-			}
-		}
-
-		puts [join $paths :]
-	}
-
-	#>>>
-	method _load_projfile {} { #<<<
-		global projinfo projinfo_loaded
-
-		if {[info exists projinfo_loaded]} return
-
-		set projfile	[getkey $::tbuildconf projfile]
-		set conffile	[file join $::dir $projfile]
-
-		if {![file exists $conffile]} {
-			fail "Cannot find config file $projfile"
-		}
-
-		if {![file readable $conffile]} {
-			fail "Cannot read config file $projfile"
-		}
-
-		set projinfo {
-			tms		{}
-			pkgs	{}
-		}
-
-		interp create -safe proj
-
-		# TODO: Not safe - provide filtered versions of these
-		interp expose proj file
-		interp expose proj glob
-
-		dsl_eval proj {
-			tm {name script} { #<<<
-				global projinfo
-
-				dict set projinfo tms $name {
-					platforms	{}
-				}
-
-				dsl_eval proj {
-					version {cx ver} { #<<<
-						dict set ::projinfo {*}$cx version $ver
-					}
-
-					#>>>
-					summary {cx summary} { #<<<
-						dict set ::projinfo {*}$cx summary $summary
-					}
-
-					#>>>
-					description {cx desc} { #<<<
-						dict set ::projinfo {*}$cx description $desc
-					}
-
-					#>>>
-					requires {cx packagelist} { #<<<
-						dict set ::projinfo {*}$cx requires $packagelist
-					}
-
-					#>>>
-					init {cx script} { #<<<
-						dict set ::projinfo {*}$cx init $script
-					}
-
-					#>>>
-					files {cx filelist} { #<<<
-						set resolvedfiles	{}
-						foreach pattern $filelist {
-							foreach file [glob -nocomplain -type file $pattern] {
-								set fqfn	[fullynormalize $file]
-								if {$fqfn ni $resolvedfiles} {
-									lappend resolvedfiles $fqfn
-								}
-							}
-						}
-						dict set ::projinfo {*}$cx files $resolvedfiles
-					}
-
-					#>>>
-					cfiles {cx filelist} { #<<<
-						dict set ::projinfo {*}$cx cfiles $filelist
-					}
-
-					#>>>
-					platform {cx platname {platform_specific_config {}}} { #<<<
-						dict set ::projinfo {*}$cx platforms $platname [dict create]
-						dsl_eval proj {
-							requires {cx packagelist} { #<<<
-								dict set ::projinfo {*}$cx requires $packagelist
-							}
-
-							#>>>
-						} $platform_specific_config [concat $cx [list platforms $platname]]
-					}
-
-					#>>>
-				} $script [list tms $name]
-			}
-
-			#>>>
-			application {name script} { #<<<
-				global projinfo
-
-				dict set projinfo applications $name {
-					platforms	{}
-				}
-
-				dsl_eval proj {
-					runtime {cx runtime} { #<<<
-						dict set ::projinfo {*}$cx runtime $runtime
-					}
-
-					#>>>
-					version {cx ver} { #<<<
-						dict set ::projinfo {*}$cx version $ver
-					}
-
-					#>>>
-					version_of {pkg} { #<<<
-						# TODO: find version of package $pkg
-					}
-
-					#>>>
-					summary {cx summary} { #<<<
-						dict set ::projinfo {*}$cx summary $summary
-					}
-
-					#>>>
-					description {cx desc} { #<<<
-						set trimmed	{}
-						foreach line [string trim [split $desc \n]] {
-							lappend trimmed	[string trim $line]
-						}
-						dict set ::projinfo {*}$cx description [join $trimmed \n]
-					}
-
-					#>>>
-					requires {cx packagelist} { #<<<
-						dict set ::projinfo {*}$cx requires $packagelist
-					}
-
-					#>>>
-					init {cx script} { #<<<
-						dict set ::projinfo {*}$cx init $script
-					}
-
-					#>>>
-					files {cx filelist} { #<<<
-						set resolvedfiles	{}
-						foreach pattern $filelist {
-							foreach file [glob -nocomplain -type file $pattern] {
-								set fqfn	[fullynormalize $file]
-								if {$fqfn ni $resolvedfiles} {
-									#lappend resolvedfiles $fqfn
-									lappend resolvedfiles $file
-								}
-							}
-						}
-						dict set ::projinfo {*}$cx files $resolvedfiles
-					}
-
-					#>>>
-					cfiles {cx filelist} { #<<<
-						dict set ::projinfo {*}$cx cfiles $filelist
-					}
-
-					#>>>
-					platform {cx platname {platform_specific_config {}}} { #<<<
-						dict set ::projinfo {*}$cx platforms $platname [dict create]
-						dsl_eval proj {
-							rpm {cx settings} { #<<<
-								dict set ::projinfo {*}$cx rpm {
-									target			""
-									release			1
-									license			"commercial"
-									vendor			"Codeforge"
-									group			"Applications/System"
-									sourcetar		"tbuild_tmp_source.tar.gz"
-									requires		{}
-									post_scriptlet	""
-									preun_scriptlet	""
-								}
-								dsl_eval proj {
-									target {cx target} { #<<<
-										dict set ::projinfo {*}$cx target $target
-									}
-
-									#>>>
-									release {cx rel} { #<<<
-										dict set ::projinfo {*}$cx release $rel
-									}
-
-									#>>>
-									license {cx lic} { #<<<
-										dict set ::projinfo {*}$cx license $lic
-									}
-
-									#>>>
-									vendor {cx vendor} { #<<<
-										dict set ::projinfo {*}$cx vendor $vendor
-									}
-
-									#>>>
-									group {cx group} { #<<<
-										dict set ::projinfo {*}$cx group $group
-									}
-
-									#>>>
-									rpmrequires {cx req} { #<<<
-										dict set ::projinfo {*}$cx requires $req
-									}
-
-									#>>>
-									post_scriptlet {cx scr} { #<<<
-										dict set ::projinfo {*}$cx post_scriptlet $scr
-									}
-
-									#>>>
-									preun_scriptlet {cx scr} { #<<<
-										dict set ::projinfo {*}$cx preun_scriptlet $scr
-									}
-
-									#>>>
-									files {cx files} { #<<<
-										dict set ::projinfo {*}$cx files $files
-									}
-
-									#>>>
-								} $settings [concat $cx [list rpm]]
-							}
-
-							#>>>
-							requires {cx packagelist} { #<<<
-								dict set ::projinfo {*}$cx requires $packagelist
-							}
-
-							#>>>
-						} $platform_specific_config [concat $cx [list platforms $platname]]
-					}
-
-					#>>>
-					choose_package {cx script} { #<<<
-						dict set ::projinfo {*}$cx choose_package $script
-					}
-
-					#>>>
-				} $script [list applications $name]
-			}
-
-			#>>>
-			pkg {name script} { #<<<
-				global projinfo
-
-				dict set projinfo pkgs $name {
-					platforms	{}
-				}
-
-				dsl_eval proj {
-					version {cx ver} { #<<<
-						dict set ::projinfo {*}$cx version $ver
-					}
-
-					#>>>
-					summary {cx summary} { #<<<
-						dict set ::projinfo {*}$cx summary $summary
-					}
-
-					#>>>
-					description {cx desc} { #<<<
-						dict set ::projinfo {*}$cx description $desc
-					}
-
-					#>>>
-					requires {cx packagelist} { #<<<
-						dict set ::projinfo {*}$cx requires $packagelist
-					}
-
-					#>>>
-					init {cx script} { #<<<
-						dict set ::projinfo {*}$cx init $script
-					}
-
-					#>>>
-					files {cx filelist} { #<<<
-						dict set ::projinfo {*}$cx files $filelist
-					}
-
-					#>>>
-					cfiles {cx filelist} { #<<<
-						dict set ::projinfo {*}$cx cfiles $filelist
-					}
-
-					#>>>
-					platform {cx platname {platform_specific_config {}}} { #<<<
-						dict set ::projinfo {*}$cx platforms $platname [dict create]
-						dsl_eval proj {
-							requires {cx packagelist} { #<<<
-								dict set ::projinfo {*}$cx requires $packagelist
-							}
-
-							#>>>
-						} $platform_specific_config [concat $cx [list platforms $platname]]
-					}
-
-					#>>>
-				} $script [list pkgs $name]
-			}
-
-			#>>>
-			this_platform {} { #<<<
-				return [platform::identify]
-			}
-
-			#>>>
-		} [readfile $conffile]
-
-		interp delete proj
-
-		set projinfo_loaded	1
-	}
-
-	#>>>
-	method _targets {} { #<<<
-		global projinfo
-		my _load_projfile
-
-		set targets	{}
-
-		set catmap	{
-			tms				tm
-			pkgs			pkg
-			applications	apps
-		}
-
-		foreach category {tms pkgs applications} {
-			if {[dict exists $projinfo $category]} {
-				foreach target [dict keys [dict get $projinfo $category]] {
-					set cat	[dict get $catmap $category]
-					lappend targets [list $cat $target]
-				}
-			}
-		}
-
-		return [concat {*}[lsort -unique $targets]]
-	}
-
-	#>>>
-	method import_runtime {path platform} { #<<<
-		package require platform
-
-		if {![file exists $path]} {
-			puts stderr "Invalid path: \"$path\""
-			exit 1
-		}
-
-		# Special case: win32 runtime on a linux host that can run it with
-		# wine (works - how to accomodate it?)
-		if {$platform ni [platform::patterns [platform::identify]]} {
-			puts stderr "Runtime is incompatible with this platform, please import it on a compatible platform and copy the imported version here"
-			exit 1
-		}
-
-		# runtime is compatible with the platform we're running on, interrogate it
-
+package provide rpm 0.2
+package require cflib 1.2
+#!/usr/bin/env cfkit8.6
+
+package require cflib 1.2
+
+namespace eval rpm {
+	proc run {args} { #<<<
+		puts "Running: ($args) in ([pwd])"
+		set cmd	$args
 		lassign [chan pipe] readpipe writepipe
-
-		set handle	[open [list |$path >@ $writepipe] w]
-		close $writepipe
-		chan configure $handle -blocking 0
-		puts -nonewline $handle {
-			catch {package require __no_such_package}
-			set runtime_info	{}
-			set builtin	{}
-			foreach package [package names] {
-				if {[catch {
-					package require $package
-				} res]} {
-					set errmsg	$res
-					puts stderr "Couldn't load package: \"$package\": $errmsg"
-				} else {
-					set ver	$res
-					lappend builtin $package $ver
-				}
-			}
-			lappend runtime_info builtin_packages $builtin
-			puts -nonewline $runtime_info
-			exit 0
-		}
-		chan configure $handle -blocking 1
+		lassign [chan pipe] e_readpipe e_writepipe
 		try {
+			lappend cmd >@ $writepipe 2>@ $e_writepipe
+			set handle	[open |$cmd w]
+			chan close $writepipe
+			chan close $e_writepipe
+			chan configure $handle \
+					-blocking 0 \
+					-translation binary \
+					-encoding binary
+			chan configure $handle -blocking 1
 			chan close $handle
 		} trap {CHILDSTATUS} {errmsg options} {
 			set exitstatus	[lindex [dict get $options -errorcode] 2]
-			puts stderr "Interrogation failed ($exitstatus): $errmsg"
-			exit 1
+
+			set output		[chan read $readpipe]
+			set e_output	[chan read $e_readpipe]
+
+			throw [list CHILDSTATUS $exitstatus $output] $e_output
 		} on ok {} {
-			set output	[read $readpipe]
-		} on error {errmsg options} {
-			puts "WARNING: interrogation wrote to stderr:\n$errmsg"
-			set output	[read $readpipe]
+			set output		[chan read $readpipe]
+			set e_output	[chan read $e_readpipe]
+			return [list $output $e_output]
 		} finally {
-			chan close $readpipe
-		}
-
-		try {
-			if {![dict exists $output builtin_packages]} {
-				error ""
+			if {[info exists readpipe]} {
+				if {$readpipe in [chan names]} {
+					chan close $readpipe
+				}
+				unset readpipe
 			}
-		} on error {} {
-			puts stderr "Could not parse interrogation result:\n$output"
-			exit 1
+			if {[info exists e_readpipe]} {
+				if {$e_readpipe in [chan names]} {
+					chan close $e_readpipe
+				}
+				unset e_readpipe
+			}
 		}
-
-		set runtime_base	[file join \
-				[dict get $::tbuildconf repo_base] \
-				runtimes \
-				$platform]
-		set runtime_data	[readfile $path binary]
-		set runtime_outfn	[file join $runtime_base bin [file tail $path]]
-		set info_outfn		[file join $runtime_base info [file tail $path]]
-
-		if {![file exists [file join $runtime_base bin]]} {
-			file mkdir [file join $runtime_base bin]
-		}
-		if {![file exists [file join $runtime_base info]]} {
-			file mkdir [file join $runtime_base info]
-		}
-
-		set attribs	[file attributes $path]
-		writefile $runtime_outfn $runtime_data binary
-		file attributes $runtime_outfn {*}$attribs
-		writefile $info_outfn $output binary
-		puts "Imported runtime \"$path\""
-		exit 0
 	}
 
 	#>>>
-	method _in_tmp_dir {script} { #<<<
-		set oldpwd		[pwd]
-		set tempfp	[file tempfile tmpdir]
-		close $tempfp
-		file delete $tmpdir
-		file mkdir $tmpdir
-		cd $tmpdir
+	proc rpm {args} { #<<<
 		try {
-			uplevel $script
-		} on error {errmsg options} {
-			dict incr options -level
-			return -options $options $errmsg
+			run rpm {*}$args
+		} on ok {res} {
+			return [string trim [lindex $res 0]]
+		}
+	}
+
+	#>>>
+	proc rpmbuild {args} { #<<<
+		lassign [run rpmbuild {*}$args] stdout stderr
+		list [string trim $stdout] [string trim $stderr]
+	}
+
+	#>>>
+	proc build_spec {spec files} { #<<<
+		set specdata	""
+		append specdata	[subst -novariables -nobackslashes {Name:		[dict get $spec name]
+Version:	[dict get $spec version]
+Release:	[dict get $spec release]
+Source:		[dict get $spec sourcetar]
+License:	[dict get $spec license]
+Vendor:		[dict get $spec vendor]
+Group:		[dict get $spec group]
+BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-buildroot
+}]
+		if {[llength [dict get $spec requires]] > 0} {
+			append specdata	[subst -novariables -nobackslashes {Requires:	[join [dict get $spec requires] " "]
+}]
+		}
+		append specdata [subst -novariables -nobackslashes {Summary:	[dict get $spec summary]
+
+%description
+[dict get $spec description]
+
+# We need to redefine __os_install_post to prevent it stripping the binaries,
+# which breaks for us because it distrupts the appended metakit databases
+%define __os_install_post   /usr/lib/rpm/brp-compress; echo "Not stripping"
+
+%prep
+%setup -q
+
+%build
+
+%install
+rm -rf $RPM_BUILD_ROOT
+}]
+		dict for {src dst} $files {
+			if {[file type $src] eq "directory"} {
+				append specdata "install -d \"\$RPM_BUILD_ROOT/[string trimleft [file dirname $dst] /]\"\n"
+				append specdata "rsync -a \"$src\" \"\$RPM_BUILD_ROOT/[string trimleft [file dirname $dst] /]\"\n"
+			} else {
+				if {[file executable $src]} {
+					set mode	"0755"
+				} else {
+					set mode	"0644"
+				}
+				append specdata [subst -novariables -nobackslashes {install -d "$RPM_BUILD_ROOT/[string trimleft [file dirname $dst] /]"
+install --mode [set mode] "[set src]" "$RPM_BUILD_ROOT/[string trimleft [set dst] /]"
+}]
+			}
+		}	
+		append specdata [subst -novariables -nobackslashes {
+%clean
+rm -rf $RPM_BUILD_ROOT
+
+%post
+[dict get $spec post_scriptlet]
+
+%preun
+[dict get $spec preun_scriptlet]
+
+%files
+}]
+		dict for {src dst} $files {
+			if {[file type $src] eq "directory"} {
+				#append specdata "%dir " $dst "\n"
+				append specdata $dst "\n"
+			} else {
+				append specdata $dst "\n"
+			}
+		}
+
+		return $specdata
+	}
+
+	#>>>
+	proc make_rpm {spec files {target ""}} { #<<<
+		try {
+			set sourcedir	[rpm --eval %_sourcedir]
+			set specdir		[rpm --eval %_specdir]
+			set rpmout		"rpmout"
+
+			set specfile	[file join $specdir testspec.spec]
+			set sourcetar	[file join $sourcedir [dict get $spec sourcetar]]
+
+			set specdata	[build_spec $spec $files]
+
+			set fp	[open $specfile w]
+			puts $fp $specdata
+			close $fp
+
+			set here	[pwd]
+			cflib::in_tmp_dir {
+				set tarbase	[dict get $spec name]-[dict get $spec version]
+				file mkdir $tarbase
+
+				dict for {src dst} $files {
+					if {[string index $src 0] eq "/"} {
+						set fqsrc	$src
+						set src	[string range $src 1 end]
+					} else {
+						set fqsrc	[file join $here $src]
+					}
+					set prefix	[file dirname $src]
+					set dstdir	[file join $tarbase $prefix]
+					if {![file exists $dstdir]} {
+						file mkdir $dstdir
+					}
+					set dsttail	[file tail $src]
+					try {
+						file copy -- $fqsrc [file join $dstdir $dsttail]
+					} on error {errmsg options} {
+						puts stderr "Error copying file: $errmsg"
+						return -options $options $errmsg
+					}
+				}
+				run tar czf $sourcetar $tarbase
+			}
+
+			if {[info exists target] && $target ne ""} {
+				try {
+					rpmbuild --target $target -bb $specfile
+				} trap {CHILDSTATUS} {errmsg options} {
+					puts stderr "rpmbuild error:\n$errmsg"
+					return -options $options $errmsg
+				} on ok {res} {
+					lassign $res buildoutput buildstderr
+				}
+			} else {
+				set buildoutput	[rpmbuild -bb $specfile]
+			}
+			set outfiles	{}
+			foreach line [split $buildoutput \n] {
+				if {[string match "Wrote: *" $line]} {
+					if {![regexp {^Wrote:\s+(.*)$} $line -> fn]} {
+						puts stderr "Couldn't parse output filename from \"$line\""
+						continue
+					}
+					if {![file exists $rpmout]} {
+						file mkdir $rpmout
+					}
+					file copy -force -- $fn $rpmout
+					puts "Wrote [file join $rpmout [file tail $fn]]"
+					file delete -- $fn
+					lappend outfiles [file join $rpmout [file tail $fn]]
+				}
+			}
+			return $outfiles
 		} finally {
-			cd $oldpwd
-			if {[info exists tmpdir] && [file exists $tmpdir]} {
-				# TODO: paranoid checks
-				file delete -force -- $tmpdir
+			if {[info exists specfile] && [file exists $specfile]} {
+				file delete -- $specfile
+			}
+			if {[info exists sourcetar] && [file exists $sourcetar]} {
+				file delete -- $sourcetar
 			}
 		}
 	}
@@ -2928,18 +7009,5 @@ source $main
 	#>>>
 }
 
-if {[llength $argv] == 0} {
-	fail "No action specified"
-}
-
-set actionargs	[lassign $argv action]
-actions $action {*}$actionargs
-
-package ifneeded app-tbuild 0.2 [list source [file join $dir _init.tcl]]
-				package require cflib
-package require trofs
-package require sugar
-package require platform
-package require rpm
-package provide app-tbuild 0.2
-source [file join [file dirname [info script]] tbuild.tcl]_init.tcl {F 200 200} tbuild.tcl {F 30686 30963} pkgIndex.tcl {F 77 277}app-tbuild {D 72 72}tcl {D 20 20}tm {D 13 31081} pkg {D 13 13} main.tcl {F 757 73427}trofs01   4
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+deb-0.3.tm {F 7247 104499} sugar-0.1.tm {F 20898 26677} cflib-1.13.0.tm {F 48052 74729} sop-1.5.1.tm {F 22523 97252} dsl-0.4.tm {F 1808 115021} rpm-0.2.tm {F 5779 5779} zip-1.2.1.tm {F 8714 113213}tcl {D 197 197}tm {D 15 15} pkg {D 13 115246} main.tcl {F 1120 172610}trofs01   7
