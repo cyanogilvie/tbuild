@@ -54,7 +54,7 @@ the crypto dependency (and any of its dependencies, recursively) together with
 the tools/blowfish.tcl file into a single-file application in apps/tcl/blowfish
 
 The apps/tcl/blowfish application requires the cfkit8.6 runtime, which is a
-trofs-based tclkit style runtime which is build to run these apps.
+trofs-based tclkit style runtime which is built to run these apps.
 
 License
 -------
